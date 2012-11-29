@@ -64,6 +64,10 @@ namespace Renci.SshNet.Sftp
             {
                 return this.Attributes.LastAccessTime;
             }
+            set
+            {
+                this.Attributes.LastAccessTime = value;
+            }
         }
 
         /// <summary>
@@ -78,6 +82,46 @@ namespace Renci.SshNet.Sftp
             {
                 return this.Attributes.LastWriteTime;
             }
+            set
+            {
+                this.Attributes.LastWriteTime = value;
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the time, in coordinated universal time (UTC), the current file or directory was last accessed.
+        /// </summary>
+        /// <value>
+        /// The time that the current file or directory was last accessed.
+        /// </value>
+        public DateTime LastAccessTimeUtc
+        {
+            get
+            {
+                return this.Attributes.LastAccessTime.ToUniversalTime();
+            }
+            set
+            {
+                this.Attributes.LastAccessTime = value.ToLocalTime();
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the time, in coordinated universal time (UTC), when the current file or directory was last written to.
+        /// </summary>
+        /// <value>
+        /// The time the current file was last written.
+        /// </value>
+        public DateTime LastWriteTimeUtc
+        {
+            get
+            {
+                return this.Attributes.LastWriteTime.ToUniversalTime();
+            }
+            set
+            {
+                this.Attributes.LastWriteTime = value.ToLocalTime();
+            }
         }
 
         /// <summary>
@@ -86,7 +130,7 @@ namespace Renci.SshNet.Sftp
         /// <value>
         /// The size of the current file in bytes.
         /// </value>
-        public long Size
+        public long Length
         {
             get
             {
@@ -428,9 +472,18 @@ namespace Renci.SshNet.Sftp
         /// Moves a specified file to a new location on remote machine, providing the option to specify a new file name.
         /// </summary>
         /// <param name="destFileName">The path to move the file to, which can specify a different file name.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="destFileName"/> is null.</exception>
         public void MoveTo(string destFileName)
         {
+            if (destFileName == null)
+                throw new ArgumentNullException("destFileName");
             this._sftpSession.RequestRename(this.FullName, destFileName);
+
+            var fullPath = this._sftpSession.GetCanonicalPath(destFileName);
+
+            this.Name = fullPath.Substring(fullPath.LastIndexOf('/') + 1);
+
+            this.FullName = fullPath;
         }
 
         /// <summary>
@@ -441,7 +494,6 @@ namespace Renci.SshNet.Sftp
             this._sftpSession.RequestSetStat(this.FullName, this.Attributes);
         }
 
-
         /// <summary>
         /// Returns a <see cref="System.String"/> that represents this instance.
         /// </summary>
@@ -450,7 +502,7 @@ namespace Renci.SshNet.Sftp
         /// </returns>
         public override string ToString()
         {
-            return string.Format(CultureInfo.CurrentCulture, "Name {0}, Size {1}, User ID {2}, Group ID {3}, Accessed {4}, Modified {5}", this.Name, this.Size, this.UserId, this.GroupId, this.LastAccessTime, this.LastWriteTime);
+            return string.Format(CultureInfo.CurrentCulture, "Name {0}, Length {1}, User ID {2}, Group ID {3}, Accessed {4}, Modified {5}", this.Name, this.Length, this.UserId, this.GroupId, this.LastAccessTime, this.LastWriteTime);
         }
     }
 }

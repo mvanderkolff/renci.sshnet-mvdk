@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Collections.ObjectModel;
 using System.Text;
+using System.Diagnostics.CodeAnalysis;
+using Renci.SshNet.Common;
 
 namespace Renci.SshNet
 {
@@ -15,6 +17,13 @@ namespace Renci.SshNet
         /// Holds the list of forwarded ports
         /// </summary>
         private List<ForwardedPort> _forwardedPorts = new List<ForwardedPort>();
+
+        /// <summary>
+        /// If true, causes the connectionInfo object to be disposed.
+        /// </summary>
+        private bool _disposeConnectionInfo;
+
+        private Stream _inputStream;
 
         /// <summary>
         /// Gets the list of forwarded ports.
@@ -49,9 +58,11 @@ namespace Renci.SshNet
         /// <exception cref="ArgumentNullException"><paramref name="password"/> is null.</exception>
         /// <exception cref="ArgumentException"><paramref name="host"/> is invalid, or <paramref name="username"/> is null or contains whitespace characters.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="port"/> is not within <see cref="System.Net.IPEndPoint.MinPort"/> and <see cref="System.Net.IPEndPoint.MaxPort"/>.</exception>
+        [SuppressMessage("Microsoft.Reliability", "CA2000:DisposeObjectsBeforeLosingScope", Justification = "Disposed in Dispose(bool) method.")]
         public SshClient(string host, int port, string username, string password)
             : this(new PasswordConnectionInfo(host, port, username, password))
         {
+            this._disposeConnectionInfo = true;
         }
 
         /// <summary>
@@ -77,9 +88,11 @@ namespace Renci.SshNet
         /// <exception cref="ArgumentNullException"><paramref name="keyFiles"/> is null.</exception>
         /// <exception cref="ArgumentException"><paramref name="host"/> is invalid, -or- <paramref name="username"/> is null or contains whitespace characters.</exception>
         /// <exception cref="ArgumentOutOfRangeException"><paramref name="port"/> is not within <see cref="System.Net.IPEndPoint.MinPort"/> and <see cref="System.Net.IPEndPoint.MaxPort"/>.</exception>
+        [SuppressMessage("Microsoft.Reliability", "CA2000:DisposeObjectsBeforeLosingScope", Justification = "Disposed in Dispose(bool) method.")]
         public SshClient(string host, int port, string username, params PrivateKeyFile[] keyFiles)
             : this(new PrivateKeyConnectionInfo(host, port, username, keyFiles))
         {
+            this._disposeConnectionInfo = true;
         }
 
         /// <summary>
@@ -111,81 +124,42 @@ namespace Renci.SshNet
         }
 
         /// <summary>
-        /// Adds forwarded port to the list.
+        /// Adds the forwarded port.
         /// </summary>
-        /// <typeparam name="T">Type of forwarded port to add</typeparam>
-        /// <param name="boundHost">The bound host.</param>
-        /// <param name="boundPort">The bound port.</param>
-        /// <param name="connectedHost">The connected host.</param>
-        /// <param name="connectedPort">The connected port.</param>
-        /// <returns>
-        /// Forwarded port
-        /// </returns>
-        /// <exception cref="ArgumentNullException"><paramref name="boundHost"/> or <paramref name="connectedHost"/> is null.</exception>
-        /// <exception cref="ArgumentException"><paramref name="boundHost"/> or <paramref name="connectedHost"/> is invalid.</exception>
-        /// <exception cref="ArgumentOutOfRangeException"><paramref name="boundPort"/> or <paramref name="connectedPort"/> is not within <see cref="System.Net.IPEndPoint.MinPort"/> and <see cref="System.Net.IPEndPoint.MaxPort"/>.</exception>
-        /// <exception cref="Renci.SshNet.Common.SshConnectionException">Client is not connected.</exception>
-        public T AddForwardedPort<T>(string boundHost, uint boundPort, string connectedHost, uint connectedPort) where T : ForwardedPort, new()
-        {            
-            if (boundHost == null)
-                throw new ArgumentNullException("boundHost");
-
-            if (connectedHost == null)
-                throw new ArgumentNullException("connectedHost");
-
-            if (!boundHost.IsValidHost())
-                throw new ArgumentException("boundHost");
-
-            if (!boundPort.IsValidPort())
-                throw new ArgumentOutOfRangeException("boundPort");
-
-            if (!connectedHost.IsValidHost())
-                throw new ArgumentException("connectedHost");
-
-            if (!connectedPort.IsValidPort())
-                throw new ArgumentOutOfRangeException("connectedPort");
+        /// <param name="port">The port.</param>
+        /// <exception cref="InvalidOperationException">Forwarded port is already added to a different client.</exception>
+        /// <exception cref="ArgumentNullException"><paramref name="port"/> is null.</exception>
+        /// <exception cref="SshConnectionException">Client is not connected.</exception>
+        public void AddForwardedPort(ForwardedPort port)
+        {
+            if (port == null)
+                throw new ArgumentNullException("port");
 
             //  Ensure that connection is established.
             this.EnsureConnection();
 
-            T port = new T();
+            if (port.Session != null && port.Session != this.Session)
+                throw new InvalidOperationException("Forwarded port is already added to a different client.");
 
             port.Session = this.Session;
-            port.BoundHost = boundHost;
-            port.BoundPort = boundPort;
-            port.Host = connectedHost;
-            port.Port = connectedPort;
 
             this._forwardedPorts.Add(port);
-
-            return port;
-        }
-
-        /// <summary>
-        /// Adds forwarded port to the list bound to "localhost".
-        /// </summary>
-        /// <typeparam name="T">Type of forwarded port to add</typeparam>
-        /// <param name="boundPort">The bound port.</param>
-        /// <param name="connectedHost">The connected host.</param>
-        /// <param name="connectedPort">The connected port.</param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentNullException"><paramref name="connectedHost"/> is null.</exception>
-        /// <exception cref="ArgumentException"><paramref name="boundPort"/>, <paramref name="connectedPort"/> or <paramref name="connectedHost"/> is invalid.</exception>
-        /// <exception cref="ArgumentOutOfRangeException"><paramref name="boundPort"/> or <paramref name="connectedPort"/> is not within <see cref="System.Net.IPEndPoint.MinPort"/> and <see cref="System.Net.IPEndPoint.MaxPort"/>.</exception>
-        /// <exception cref="Renci.SshNet.Common.SshConnectionException">Client is not connected.</exception>
-        public T AddForwardedPort<T>(uint boundPort, string connectedHost, uint connectedPort) where T : ForwardedPort, new()
-        {            
-            return this.AddForwardedPort<T>("localhost", boundPort, connectedHost, connectedPort);
         }
 
         /// <summary>
         /// Stops and removes the forwarded port from the list.
         /// </summary>
         /// <param name="port">Forwarded port.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="port"/> is null.</exception>
         public void RemoveForwardedPort(ForwardedPort port)
         {
+            if (port == null)
+                throw new ArgumentNullException("port");
+
             //  Stop port forwarding before removing it
             port.Stop();
+
+            port.Session = null;
 
             this._forwardedPorts.Remove(port);
         }
@@ -195,9 +169,10 @@ namespace Renci.SshNet
         /// </summary>
         /// <param name="commandText">The command text.</param>
         /// <returns><see cref="SshCommand"/> object.</returns>
+        /// <exception cref="SshConnectionException">Client is not connected.</exception>
         public SshCommand CreateCommand(string commandText)
         {
-            return this.CreateCommand(commandText, Renci.SshNet.Common.ASCIIEncoding.Current);
+            return this.CreateCommand(commandText, Encoding.UTF8);
         }
 
         /// <summary>
@@ -206,6 +181,8 @@ namespace Renci.SshNet
         /// <param name="commandText">The command text.</param>
         /// <param name="encoding">The encoding to use for results.</param>
         /// <returns><see cref="SshCommand"/> object which uses specified encoding.</returns>
+        /// <exception cref="SshConnectionException">Client is not connected.</exception>
+        /// <exception cref="ArgumentNullException"><paramref name="commandText"/> or <paramref name="encoding"/> is null.</exception>
         public SshCommand CreateCommand(string commandText, Encoding encoding)
         {
             //  Ensure that connection is established.
@@ -218,7 +195,13 @@ namespace Renci.SshNet
         /// Creates and executes the command.
         /// </summary>
         /// <param name="commandText">The command text.</param>
-        /// <returns></returns>
+        /// <returns>Returns an instance of <see cref="SshCommand"/> with execution results.</returns>
+        /// <remarks>This method internally uses asynchronous calls.</remarks>
+        /// <exception cref="ArgumentException">CommandText property is empty.</exception>
+        /// <exception cref="Renci.SshNet.Common.SshException">Invalid Operation - An existing channel was used to execute this command.</exception>
+        /// <exception cref="InvalidOperationException">Asynchronous operation is already in progress.</exception>
+        /// <exception cref="SshConnectionException">Client is not connected.</exception>
+        /// <exception cref="ArgumentNullException"><paramref name="commandText"/> is null.</exception>
         public SshCommand RunCommand(string commandText)
         {
             var cmd = this.CreateCommand(commandText);
@@ -239,7 +222,7 @@ namespace Renci.SshNet
         /// <param name="height">The height.</param>
         /// <param name="terminalMode">The terminal mode.</param>
         /// <param name="bufferSize">Size of the internal read buffer.</param>
-        /// <returns></returns>
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
         public Shell CreateShell(Stream input, Stream output, Stream extendedOutput, string terminalName, uint columns, uint rows, uint width, uint height, string terminalMode, int bufferSize)
         {
             //  Ensure that connection is established.
@@ -260,7 +243,7 @@ namespace Renci.SshNet
         /// <param name="width">The width.</param>
         /// <param name="height">The height.</param>
         /// <param name="terminalMode">The terminal mode.</param>
-        /// <returns></returns>
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
         public Shell CreateShell(Stream input, Stream output, Stream extendedOutput, string terminalName, uint columns, uint rows, uint width, uint height, string terminalMode)
         {
             return this.CreateShell(input, output, extendedOutput, terminalName, columns, rows, width, height, terminalMode, 1024);
@@ -272,7 +255,7 @@ namespace Renci.SshNet
         /// <param name="input">The input.</param>
         /// <param name="output">The output.</param>
         /// <param name="extendedOutput">The extended output.</param>
-        /// <returns></returns>
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
         public Shell CreateShell(Stream input, Stream output, Stream extendedOutput)
         {
             return this.CreateShell(input, output, extendedOutput, string.Empty, 0, 0, 0, 0, string.Empty, 1024);
@@ -292,19 +275,19 @@ namespace Renci.SshNet
         /// <param name="height">The height.</param>
         /// <param name="terminalMode">The terminal mode.</param>
         /// <param name="bufferSize">Size of the internal read buffer.</param>
-        /// <returns></returns>
-        public Shell CreateShell(Encoding encoding, string input, Stream output, Stream extendedOutput, string terminalName, uint columns, uint rows, uint width , uint height , string terminalMode, int bufferSize)
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
+        public Shell CreateShell(Encoding encoding, string input, Stream output, Stream extendedOutput, string terminalName, uint columns, uint rows, uint width, uint height, string terminalMode, int bufferSize)
         {
             //  Ensure that connection is established.
             this.EnsureConnection();
 
-            var inputStream = new MemoryStream();
-            var writer = new StreamWriter(inputStream, encoding);
+            this._inputStream = new MemoryStream();
+            var writer = new StreamWriter(this._inputStream, encoding);
             writer.Write(input);
             writer.Flush();
-            inputStream.Seek(0, SeekOrigin.Begin);
+            this._inputStream.Seek(0, SeekOrigin.Begin);
 
-            return this.CreateShell(inputStream, output, extendedOutput, terminalName, columns, rows, width, height, terminalMode, bufferSize);
+            return this.CreateShell(this._inputStream, output, extendedOutput, terminalName, columns, rows, width, height, terminalMode, bufferSize);
         }
 
         /// <summary>
@@ -320,7 +303,7 @@ namespace Renci.SshNet
         /// <param name="width">The width.</param>
         /// <param name="height">The height.</param>
         /// <param name="terminalMode">The terminal mode.</param>
-        /// <returns></returns>
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
         public Shell CreateShell(Encoding encoding, string input, Stream output, Stream extendedOutput, string terminalName, uint columns, uint rows, uint width, uint height, string terminalMode)
         {
             return this.CreateShell(encoding, input, output, extendedOutput, terminalName, columns, rows, width, height, terminalMode, 1024);
@@ -333,11 +316,48 @@ namespace Renci.SshNet
         /// <param name="input">The input.</param>
         /// <param name="output">The output.</param>
         /// <param name="extendedOutput">The extended output.</param>
-        /// <returns></returns>
+        /// <returns>Returns a representation of a <see cref="Shell"/> object.</returns>
         public Shell CreateShell(Encoding encoding, string input, Stream output, Stream extendedOutput)
         {
             return this.CreateShell(encoding, input, output, extendedOutput, string.Empty, 0, 0, 0, 0, string.Empty, 1024);
         }
 
+        /// <summary>
+        /// Creates the shell stream.
+        /// </summary>
+        /// <param name="terminalName">Name of the terminal.</param>
+        /// <param name="columns">The columns.</param>
+        /// <param name="rows">The rows.</param>
+        /// <param name="width">The width.</param>
+        /// <param name="height">The height.</param>
+        /// <param name="bufferSize">Size of the buffer.</param>
+        /// <param name="terminalModeValues">The terminal mode values.</param>
+        /// <returns></returns>
+        public ShellStream CreateShellStream(string terminalName, uint columns, uint rows, uint width, uint height, int bufferSize, params KeyValuePair<TerminalModes, uint>[] terminalModeValues)
+        {
+            //  Ensure that connection is established.
+            this.EnsureConnection();
+
+            return new ShellStream(this.Session, terminalName, columns, rows, width, height, bufferSize, terminalModeValues);
+        }
+
+
+        /// <summary>
+        /// Releases unmanaged and - optionally - managed resources
+        /// </summary>
+        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged ResourceMessages.</param>
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+
+            if (this._disposeConnectionInfo)
+                ((IDisposable)this.ConnectionInfo).Dispose();
+
+            if (this._inputStream != null)
+            {
+                this._inputStream.Dispose();
+                this._inputStream = null;
+            }
+        }
     }
 }

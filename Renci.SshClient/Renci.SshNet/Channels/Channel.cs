@@ -20,6 +20,8 @@ namespace Renci.SshNet.Channels
 
         private EventWaitHandle _disconnectedWaitHandle = new ManualResetEvent(false);
 
+        private bool _closeMessageSent = false;
+
         private uint _initialWindowSize = 0x100000;
 
         private uint _maximumPacketSize = 0x8000;
@@ -197,11 +199,33 @@ namespace Renci.SshNet.Channels
         }
 
         /// <summary>
+        /// Sends the SSH_MSG_CHANNEL_EOF message.
+        /// </summary>
+        internal void SendEof()
+        {
+            //  Send EOF message first when channel need to be closed
+            this.SendMessage(new ChannelEofMessage(this.RemoteChannelNumber));
+        }
+
+        internal void SendData(byte[] buffer)
+        {
+            this.SendMessage(new ChannelDataMessage(this.RemoteChannelNumber, buffer));
+        }
+
+        /// <summary>
         /// Closes the channel.
         /// </summary>
         public virtual void Close()
         {
-            this.Dispose();
+            //  Send message to close the channel on the server
+            if (!_closeMessageSent)
+            {
+                this.SendMessage(new ChannelCloseMessage(this.RemoteChannelNumber));
+                this._closeMessageSent = true;
+            }
+
+            //  Wait for channel to be closed
+            this._session.WaitHandle(this._channelClosedWaitHandle);
         }
 
         #region Channel virtual methods
@@ -314,7 +338,11 @@ namespace Renci.SshNet.Channels
             this._session.Disconnected -= Session_Disconnected;
 
             //  Send close message to channel to confirm channel closing
-            this.SendMessage(new ChannelCloseMessage(this.RemoteChannelNumber));
+            if (!_closeMessageSent)
+            {
+                this.SendMessage(new ChannelCloseMessage(this.RemoteChannelNumber));
+                this._closeMessageSent = true;
+            }
             
             if (this.Closed != null)
             {
@@ -459,11 +487,19 @@ namespace Renci.SshNet.Channels
 
         private void Session_Disconnected(object sender, EventArgs e)
         {
+            //  If objected is disposed or being disposed don't handle this event
+            if (this._isDisposed)
+                return;
+
             this._disconnectedWaitHandle.Set();
         }
 
         private void Session_ErrorOccured(object sender, ExceptionEventArgs e)
         {
+            //  If objected is disposed or being disposed don't handle this event
+            if (this._isDisposed)
+                return;
+
             this._errorOccuredWaitHandle.Set();
         }
 
@@ -598,7 +634,7 @@ namespace Renci.SshNet.Channels
         /// </summary>
         public void Dispose()
         {
-            Dispose(true);
+            this.Dispose(true);
 
             GC.SuppressFinalize(this);
         }
@@ -616,15 +652,6 @@ namespace Renci.SshNet.Channels
                 // and unmanaged resources.
                 if (disposing)
                 {
-                    //  Send EOF message first when channel need to be closed
-                    this.SendMessage(new ChannelEofMessage(this.RemoteChannelNumber));
-
-                    //  Send message to close the channel on the server
-                    this.SendMessage(new ChannelCloseMessage(this.RemoteChannelNumber));
-
-                    //  Wait for channel to be closed
-                    this._session.WaitHandle(this._channelClosedWaitHandle);
-
                     // Dispose managed resources.
                     if (this._channelClosedWaitHandle != null)
                     {
@@ -678,7 +705,7 @@ namespace Renci.SshNet.Channels
             // Do not re-create Dispose clean-up code here.
             // Calling Dispose(false) is optimal in terms of
             // readability and maintainability.
-            Dispose(false);
+            this.Dispose(false);
         }
 
         #endregion

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.IO;
+using System.Threading;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Renci.SshNet.Sftp
 {
@@ -73,10 +75,10 @@ namespace Renci.SshNet.Sftp
         /// Gets the length in bytes of the stream.
         /// </summary>
         /// <returns>A long value representing the length of the stream in bytes.</returns>
-        ///   
         /// <exception cref="T:System.NotSupportedException">A class derived from Stream does not support seeking. </exception>
-        ///   
         /// <exception cref="T:System.ObjectDisposedException">Methods were called after the stream was closed. </exception>
+        /// <exception cref="T:System.IO.IOException">IO operation failed. </exception>
+        [SuppressMessage("Microsoft.Design", "CA1065:DoNotRaiseExceptionsInUnexpectedLocations", Justification = "Be design this is the exception that stream need to throw.")]
         public override long Length
         {
             get
@@ -295,63 +297,8 @@ namespace Renci.SshNet.Sftp
 
             if (mode == FileMode.Append)
             {
-                //  TODO:   Validate Size property value exists
                 this._position = this._attributes.Size;
             }
-        }
-
-        internal SftpFileStream(SftpSession session, byte[] handle, FileAccess access)
-            : this(session, handle, access, true, 4096, false)
-        {
-            // Nothing to do here.
-        }
-
-        internal SftpFileStream(SftpSession session, byte[] handle, FileAccess access, bool ownsHandle)
-            : this(session, handle, access, ownsHandle, 4096, false)
-        {
-            // Nothing to do here.
-        }
-
-        internal SftpFileStream(SftpSession session, byte[] handle, FileAccess access, bool ownsHandle, int bufferSize)
-            : this(session, handle, access, ownsHandle, bufferSize, false)
-        {
-            // Nothing to do here.
-        }
-
-        internal SftpFileStream(SftpSession session, byte[] handle, FileAccess access, bool ownsHandle, int bufferSize, bool isAsync)
-        {
-            //  TODO:   See if it make sense to have "handle" constructors
-
-            // Validate the parameters.
-            if (bufferSize <= 0)
-            {
-                throw new ArgumentOutOfRangeException("bufferSize");
-            }
-            if (access < FileAccess.Read || access > FileAccess.ReadWrite)
-            {
-                throw new ArgumentOutOfRangeException("access");
-            }
-
-            // Initialize the object state.
-            this._handle = handle;
-            this._access = access;
-            this._ownsHandle = ownsHandle;
-            this._isAsync = isAsync;
-            this._bufferSize = bufferSize;
-            this._buffer = new byte[bufferSize];
-            this._bufferPosn = 0;
-            this._bufferLen = 0;
-            this._bufferOwnedByWrite = false;
-            this._canSeek = true;
-            this._position = 0; //  Assumption is that no other object uses the same file handle
-
-            this._attributes = this._session.RequestFStat(this._handle);
-
-            //if (mode == FileMode.Append)
-            //{
-            //    //  TODO:   Validate Size property value exists
-            //    this._position = (long)this._attributes.Size.Value;
-            //}
         }
 
         /// <summary>
@@ -568,7 +515,7 @@ namespace Renci.SshNet.Sftp
                     }
 
                     // Copy stream data to the caller's buffer.
-                    Array.Copy(this._buffer, this._bufferPosn, buffer, offset, tempLen);
+                    Buffer.BlockCopy(this._buffer, this._bufferPosn, buffer, offset, tempLen);
 
                     // Advance to the next buffer positions.
                     readLen += tempLen;
@@ -852,7 +799,10 @@ namespace Renci.SshNet.Sftp
 
                         Buffer.BlockCopy(this._buffer, 0, data, 0, this._bufferPosn);
 
-                        this._session.RequestWrite(this._handle, (ulong)this.Position, data);
+                        using (var wait = new AutoResetEvent(false))
+                        {
+                            this._session.RequestWrite(this._handle, (ulong)this.Position, data, wait);
+                        }
 
                         this._bufferPosn = 0;
                         tempLen = this._bufferSize;
@@ -870,13 +820,15 @@ namespace Renci.SshNet.Sftp
 
                         Buffer.BlockCopy(buffer, offset, data, 0, tempLen);
 
-                        this._session.RequestWrite(this._handle, (ulong)this.Position, data);
+                        using (var wait = new AutoResetEvent(false))
+                        {
+                            this._session.RequestWrite(this._handle, (ulong)this.Position, data, wait);
+                        }
                     }
                     else
                     {
                         // No: copy the data to the write buffer first.
-                        Array.Copy(buffer, offset, this._buffer,
-                                   this._bufferPosn, tempLen);
+                        Buffer.BlockCopy(buffer, offset, this._buffer, this._bufferPosn, tempLen);
                         this._bufferPosn += tempLen;
                     }
 
@@ -894,7 +846,10 @@ namespace Renci.SshNet.Sftp
 
                     Buffer.BlockCopy(this._buffer, 0, data, 0, this._bufferPosn);
 
-                    this._session.RequestWrite(this._handle, (ulong)this.Position, data);
+                    using (var wait = new AutoResetEvent(false))
+                    {
+                        this._session.RequestWrite(this._handle, (ulong)this.Position, data, wait);
+                    }
 
                     this._bufferPosn = 0;
                 }
@@ -925,7 +880,10 @@ namespace Renci.SshNet.Sftp
 
                     Buffer.BlockCopy(this._buffer, 0, data, 0, this._bufferPosn);
 
-                    this._session.RequestWrite(this._handle, (ulong)this.Position, data);
+                    using (var wait = new AutoResetEvent(false))
+                    {
+                        this._session.RequestWrite(this._handle, (ulong)this.Position, data, wait);
+                    }
 
                     this._bufferPosn = 0;
                 }
@@ -989,7 +947,10 @@ namespace Renci.SshNet.Sftp
 
                 Buffer.BlockCopy(this._buffer, 0, data, 0, this._bufferPosn);
 
-                this._session.RequestWrite(this._handle, (ulong)(this.Position - this._bufferPosn), data);
+                using (var wait = new AutoResetEvent(false))
+                {
+                    this._session.RequestWrite(this._handle, (ulong)(this.Position - this._bufferPosn), data, wait);
+                }
 
                 this._bufferPosn = 0;
             }

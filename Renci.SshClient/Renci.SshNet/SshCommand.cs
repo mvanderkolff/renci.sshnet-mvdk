@@ -130,10 +130,14 @@ namespace Renci.SshNet
         /// <param name="session">The session.</param>
         /// <param name="commandText">The command text.</param>
         /// <param name="encoding">The encoding.</param>
+        /// <exception cref="ArgumentNullException">Either <paramref name="session"/>, <paramref name="commandText"/> or <paramref name="encoding"/> is null.</exception>
         internal SshCommand(Session session, string commandText, Encoding encoding)
         {
             if (session == null)
                 throw new ArgumentNullException("session");
+
+            if (commandText == null)
+                throw new ArgumentNullException("commandText");
 
             this._encoding = encoding;
             this._session = session;
@@ -171,9 +175,7 @@ namespace Renci.SshNet
                 AsyncState = state,
             };
 
-            
-            // TODO: kenneth_aa (2011-08-16) - Need better explanation for this, to make a good exception documentation.
-            //  When command re-executed again, create a new channel
+                        //  When command re-executed again, create a new channel
             if (this._channel != null)
             {
                 throw new SshException("Invalid operation.");
@@ -183,7 +185,7 @@ namespace Renci.SshNet
 
             if (string.IsNullOrEmpty(this.CommandText))
                 throw new ArgumentException("CommandText property is empty.");
-            // TODO: What happens if callback is null?
+
             this._callback = callback;
 
             this._channel.Open();
@@ -206,6 +208,7 @@ namespace Renci.SshNet
         public IAsyncResult BeginExecute(string commandText, AsyncCallback callback, object state)
         {
             this.CommandText = commandText;
+
             return BeginExecute(callback, state);
         }
 
@@ -226,7 +229,12 @@ namespace Renci.SshNet
                         //  Make sure that operation completed if not wait for it to finish
                         this.WaitHandle(this._asyncResult.AsyncWaitHandle);
 
-                        this._channel.Close();
+                        if (this._channel.IsOpen)
+                        {
+                            this._channel.SendEof();
+
+                            this._channel.Close();
+                        }
 
                         this._channel = null;
 
@@ -252,30 +260,15 @@ namespace Renci.SshNet
         }
 
         /// <summary>
-        /// Cancels command execution in asynchronous scenarios. CURRENTLY NOT IMPLEMENTED.
+        /// Cancels command execution in asynchronous scenarios. 
         /// </summary>
-        //public void Cancel()
-        //{
-        //    if (this._channel != null && this._channel.IsOpen)
-        //    {
-        //        //this._channel.SendData(Encoding.ASCII.GetBytes("~."));
-        //        this._channel.SendExecRequest("\0x03");
-
-        //        //this._channel.SendSignalRequest("ABRT");
-        //        //this._channel.SendSignalRequest("ALRM");
-        //        //this._channel.SendSignalRequest("FPE");
-        //        //this._channel.SendSignalRequest("HUP");
-        //        //this._channel.SendSignalRequest("ILL");
-        //        //this._channel.SendSignalRequest("INT");
-        //        //this._channel.SendSignalRequest("PIPE");
-        //        //this._channel.SendSignalRequest("QUIT");
-        //        //this._channel.SendSignalRequest("SEGV");
-        //        //this._channel.SendSignalRequest("TERM");
-        //        //this._channel.SendSignalRequest("SEGV");
-        //        //this._channel.SendSignalRequest("USR1");
-        //        //this._channel.SendSignalRequest("USR2");
-        //    }
-        //}
+        public void CancelAsync()
+        {
+            if (this._channel != null && this._channel.IsOpen && this._asyncResult != null)
+            {
+                this._channel.Close();
+            }
+        }
 
         /// <summary>
         /// Executes the specified command text.
@@ -287,6 +280,7 @@ namespace Renci.SshNet
         public string Execute(string commandText)
         {
             this.CommandText = commandText;
+
             return this.Execute();
         }
 
@@ -324,6 +318,10 @@ namespace Renci.SshNet
 
         private void Session_Disconnected(object sender, EventArgs e)
         {
+            //  If objected is disposed or being disposed don't handle this event
+            if (this._isDisposed)
+                return;
+
             this._exception = new SshConnectionException("An established connection was aborted by the software in your host machine.", DisconnectReason.ConnectionLost);
 
             this._sessionErrorOccuredWaitHandle.Set();
@@ -331,6 +329,10 @@ namespace Renci.SshNet
 
         private void Session_ErrorOccured(object sender, ExceptionEventArgs e)
         {
+            //  If objected is disposed or being disposed don't handle this event
+            if (this._isDisposed)
+                return;
+
             this._exception = e.Exception;
 
             this._sessionErrorOccuredWaitHandle.Set();
@@ -396,7 +398,6 @@ namespace Renci.SshNet
             if (this.OutputStream != null)
             {
                 this.OutputStream.Write(e.Data, 0, e.Data.Length);
-                //this._outputSteamWriter.Write(this._encoding.GetString(e.Data, 0, e.Data.Length));
                 this.OutputStream.Flush();
             }
 

@@ -14,6 +14,7 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
         /// Initializes a new instance of the <see cref="Arc4Cipher"/> class.
         /// </summary>
         /// <param name="key">The key.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
         public Arc4Cipher(byte[] key)
             : base(key)
         {
@@ -68,18 +69,6 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
         /// <param name="input">The input.</param>
         /// <returns></returns>
         public override byte[] Decrypt(byte[] input)
-        {
-            throw new NotImplementedException();
-        }
-
-        /// <summary>
-        /// Validates the size of the key.
-        /// </summary>
-        /// <param name="keySize">Size of the key.</param>
-        /// <returns>
-        /// true if keySize is valid; otherwise false
-        /// </returns>
-        protected override bool ValidateKeySize(int keySize)
         {
             throw new NotImplementedException();
         }

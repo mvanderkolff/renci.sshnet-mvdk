@@ -21,21 +21,39 @@ namespace Renci.SshNet.Security.Cryptography
         /// <value>
         /// The size of the block in bytes.
         /// </value>
-        public abstract int BlockSize { get; }
+        protected readonly int _blockSize;
+
+        /// <summary>
+        /// Gets the size of the block.
+        /// </summary>
+        /// <value>
+        /// The size of the block.
+        /// </value>
+        public int BlockSize
+        {
+            get
+            {
+                return this._blockSize;
+            }
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BlockCipher"/> class.
         /// </summary>
         /// <param name="key">The key.</param>
+        /// <param name="blockSize">Size of the block.</param>
         /// <param name="mode">Cipher mode.</param>
         /// <param name="padding">Cipher padding.</param>
-        protected BlockCipher(byte[] key, CipherMode mode, CipherPadding padding)
+        /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
+        protected BlockCipher(byte[] key, int blockSize, CipherMode mode, CipherPadding padding)
             : base(key)
         {
+            this._blockSize = blockSize;
             this._mode = mode;
             this._padding = padding;
 
-            this._mode.Init(this);
+            if (this._mode != null)
+                this._mode.Init(this);
         }
 
         /// <summary>
@@ -47,7 +65,7 @@ namespace Renci.SshNet.Security.Cryptography
         {
             var output = new byte[data.Length];
 
-            if (data.Length % this.BlockSize > 0)
+            if (data.Length % this._blockSize > 0)
             {
                 if (this._padding == null)
                 {
@@ -55,21 +73,21 @@ namespace Renci.SshNet.Security.Cryptography
                 }
                 else
                 {
-                    data = this._padding.Pad(this.BlockSize, data);
+                    data = this._padding.Pad(this._blockSize, data);
                 }
             }
 
             var writtenBytes = 0;
 
-            for (int i = 0; i < data.Length / this.BlockSize; i++)
+            for (int i = 0; i < data.Length / this._blockSize; i++)
             {
                 if (this._mode == null)
                 {
-                    writtenBytes += this.EncryptBlock(data, i * this.BlockSize, this.BlockSize, output, i * this.BlockSize);
+                    writtenBytes += this.EncryptBlock(data, i * this._blockSize, this._blockSize, output, i * this._blockSize);
                 }
                 else
                 {
-                    writtenBytes += this._mode.EncryptBlock(data, i * this.BlockSize, this.BlockSize, output, i * this.BlockSize);
+                    writtenBytes += this._mode.EncryptBlock(data, i * this._blockSize, this._blockSize, output, i * this._blockSize);
                 }
             }
 
@@ -88,7 +106,7 @@ namespace Renci.SshNet.Security.Cryptography
         /// <returns>Decrypted data</returns>
         public override byte[] Decrypt(byte[] data)
         {
-            if (data.Length % this.BlockSize > 0)
+            if (data.Length % this._blockSize > 0)
             {
                 {
                     if (this._padding == null)
@@ -97,7 +115,7 @@ namespace Renci.SshNet.Security.Cryptography
                     }
                     else
                     {
-                        data = this._padding.Pad(this.BlockSize, data);
+                        data = this._padding.Pad(this._blockSize, data);
                     }
                 }
             }
@@ -105,15 +123,15 @@ namespace Renci.SshNet.Security.Cryptography
             var output = new byte[data.Length];
 
             var writtenBytes = 0;
-            for (int i = 0; i < data.Length / this.BlockSize; i++)
+            for (int i = 0; i < data.Length / this._blockSize; i++)
             {
                 if (this._mode == null)
                 {
-                    writtenBytes += this.DecryptBlock(data, i * this.BlockSize, this.BlockSize, output, i * this.BlockSize);
+                    writtenBytes += this.DecryptBlock(data, i * this._blockSize, this._blockSize, output, i * this._blockSize);
                 }
                 else
                 {
-                    writtenBytes += this._mode.DecryptBlock(data, i * this.BlockSize, this.BlockSize, output, i * this.BlockSize);
+                    writtenBytes += this._mode.DecryptBlock(data, i * this._blockSize, this._blockSize, output, i * this._blockSize);
 
                 }
             }

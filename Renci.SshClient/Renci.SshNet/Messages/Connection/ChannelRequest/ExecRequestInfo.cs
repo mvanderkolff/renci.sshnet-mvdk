@@ -1,4 +1,6 @@
-﻿namespace Renci.SshNet.Messages.Connection
+﻿using System.Text;
+
+namespace Renci.SshNet.Messages.Connection
 {
     /// <summary>
     /// Represents "exec" type channel request information
@@ -38,9 +40,13 @@
         /// Initializes a new instance of the <see cref="ExecRequestInfo"/> class.
         /// </summary>
         /// <param name="command">The command.</param>
+        /// <exception cref="System.ArgumentNullException"><paramref name="command"/> is null.</exception>
         public ExecRequestInfo(string command)
             : this()
         {
+            if (command == null)
+                throw new System.ArgumentNullException("command");
+
             this.Command = command;
         }
 

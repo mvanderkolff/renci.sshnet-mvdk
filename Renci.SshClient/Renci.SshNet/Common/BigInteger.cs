@@ -44,12 +44,14 @@
 * ***************************************************************************/
 
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 using System.Threading;
+using System.Security.Cryptography;
 
 /*
 Optimization
@@ -68,6 +70,8 @@ namespace Renci.SshNet.Common
     /// </summary>
     public struct BigInteger : IComparable, IFormattable, IComparable<BigInteger>, IEquatable<BigInteger>
     {
+        private static RNGCryptoServiceProvider _randomizer = new System.Security.Cryptography.RNGCryptoServiceProvider();
+
         private const ulong _BASE = 0x100000000;
         private const Int32 _DECIMALSIGNMASK = unchecked((Int32)0x80000000);
         private const int _BIAS = 1075;
@@ -78,6 +82,30 @@ namespace Renci.SshNet.Common
         //LSB on [0]
         private readonly uint[] _data;
         private readonly short _sign;
+
+        /// <summary>
+        /// Gets number of bits used by the number.
+        /// </summary>
+        /// <value>
+        /// The number of the bit used.
+        /// </value>
+        public int BitLength
+        {
+            get
+            {
+                if (this._sign == 0)
+                    return 0;
+
+                var msbIndex = this._data.Length - 1;
+
+                while (this._data[msbIndex] == 0)
+                    msbIndex--;
+
+                var msbBitCount = BitScanBackward(this._data[msbIndex]) + 1;
+
+                return msbIndex * 4 * 8 + msbBitCount + ((this._sign > 0) ? 0 : 1);
+            }
+        }
 
         #region Constractors
 
@@ -1936,6 +1964,19 @@ namespace Renci.SshNet.Common
         }
 
         /// <summary>
+        /// Generates random BigInteger number
+        /// </summary>
+        /// <param name="bitLength">Length of random number in bits.</param>
+        /// <returns></returns>
+        public static BigInteger Random(int bitLength)
+        {
+            var bytesArray = new byte[bitLength / 8 + (((bitLength % 8) > 0) ? 1 : 0)];
+            _randomizer.GetBytes(bytesArray);
+            bytesArray[bytesArray.Length - 1] = (byte)(bytesArray[bytesArray.Length - 1] & 0x7F);   //  Ensure not a negative value
+            return new BigInteger(bytesArray.ToArray());
+        }
+
+        /// <summary>
         /// Divides one System.Numerics.BigInteger value by another and returns the result.
         /// </summary>
         /// <param name="dividend">The value to be divided.</param>
@@ -3099,6 +3140,7 @@ namespace Renci.SshNet.Common
         private static byte[] Resize(byte[] v, int len)
         {
             byte[] res = new byte[len];
+            Buffer.BlockCopy(v, 0, res, 0, Math.Min(v.Length, len));
             Array.Copy(v, res, Math.Min(v.Length, len));
             return res;
         }
@@ -3106,7 +3148,7 @@ namespace Renci.SshNet.Common
         private static uint[] Resize(uint[] v, int len)
         {
             uint[] res = new uint[len];
-            Array.Copy(v, res, Math.Min(v.Length, len));
+            Buffer.BlockCopy(v, 0, res, 0, Math.Min(v.Length, len) * sizeof(uint));
             return res;
         }
 

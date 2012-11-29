@@ -16,56 +16,20 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
 
         private bool _isPrivate;
 
-        private BigInteger _exponent;
-
-        private BigInteger _modulus;
-        private BigInteger _d;
-        private BigInteger _dp;
-        private BigInteger _dq;
-        private BigInteger _inverseQ;
-        private BigInteger _p;
-        private BigInteger _q;
+        private RsaKey _key;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RsaCipher"/> class.
         /// </summary>
-        /// <param name="exponent">The exponent.</param>
-        /// <param name="modulus">The modulus.</param>
-        public RsaCipher(BigInteger exponent, BigInteger modulus)
+        /// <param name="key">The RSA key.</param>
+        public RsaCipher(RsaKey key)
         {
-            //if (key == null)
-            //    throw new ArgumentNullException("key");
-            //this._publicKey = key;
-            this._exponent = exponent;
-            this._modulus = modulus;
-            this._isPrivate = false;
-        }
+            if (key == null)
+                throw new ArgumentNullException("key");
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="RsaCipher"/> class.
-        /// </summary>
-        /// <param name="exponent">The exponent.</param>
-        /// <param name="modulus">The modulus.</param>
-        /// <param name="d">The d.</param>
-        /// <param name="dp">The dp.</param>
-        /// <param name="dq">The dq.</param>
-        /// <param name="inverseQ">The inverse Q.</param>
-        /// <param name="p">The p.</param>
-        /// <param name="q">The q.</param>
-        public RsaCipher(BigInteger exponent, BigInteger modulus, BigInteger d, BigInteger dp, BigInteger dq, BigInteger inverseQ, BigInteger p, BigInteger q)
-        {
-            //if (key == null)
-            //    throw new ArgumentNullException("key");
-            //this._privateKey = key;
-            this._exponent = exponent;
-            this._modulus = modulus;
-            this._d = d;
-            this._dp = dp;
-            this._dq = dq;
-            this._inverseQ = inverseQ;
-            this._p = p;
-            this._q = q;
-            this._isPrivate = true;
+            this._key = key;
+
+            this._isPrivate = !this._key.D.IsZero;
         }
 
         /// <summary>
@@ -75,7 +39,20 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
         /// <returns></returns>
         public override byte[] Encrypt(byte[] data)
         {
-            return this.Transform(data);
+            //  Calculate signature
+            var bitLength = this._key.Modulus.BitLength;
+
+            var paddedBlock = new byte[bitLength / 8 + (bitLength % 8 > 0 ? 1 : 0) - 1];
+
+            paddedBlock[0] = 0x01;
+            for (int i = 1; i < paddedBlock.Length - data.Length - 1; i++)
+            {
+                paddedBlock[i] = 0xFF;
+            }
+
+            Buffer.BlockCopy(data, 0, paddedBlock, paddedBlock.Length - data.Length, data.Length);
+
+            return this.Transform(paddedBlock);
         }
 
         /// <summary>
@@ -83,9 +60,24 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
         /// </summary>
         /// <param name="data">The data.</param>
         /// <returns></returns>
+        /// <exception cref="NotSupportedException">Thrown when decrypted block type is not supported.</exception>
         public override byte[] Decrypt(byte[] data)
         {
-            return this.Transform(data);
+            var paddedBlock = this.Transform(data);
+
+            if (paddedBlock[0] != 1 && paddedBlock[0] != 2)
+                throw new NotSupportedException("Only block type 01 or 02 are supported.");
+
+            var position = 1;
+            while (position < paddedBlock.Length && paddedBlock[position] != 0)
+                position++;
+            position++;
+
+            var result = new byte[paddedBlock.Length - position];
+
+            Buffer.BlockCopy(paddedBlock, position, result, 0, result.Length);
+
+            return result;
         }
 
         private byte[] Transform(byte[] data)
@@ -101,40 +93,40 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers
             {
                 BigInteger random = BigInteger.One;
 
-                var max = this._modulus - 1;
+                var max = this._key.Modulus - 1;
+                
+                var bitLength = this._key.Modulus.BitLength;
+
+                if (max < BigInteger.One)
+                    throw new SshException("Invalid RSA key.");
 
                 while (random <= BigInteger.One || random >= max)
                 {
-                    var bytesArray = new byte[256];
-                    _randomizer.GetBytes(bytesArray);
-
-                    bytesArray[bytesArray.Length - 1] = (byte)(bytesArray[bytesArray.Length - 1] & 0x7F);   //  Ensure not a negative value
-                    random = new BigInteger(bytesArray.Reverse().ToArray());
+                    random = BigInteger.Random(bitLength);
                 }
 
-                BigInteger blindedInput = BigInteger.PositiveMod((BigInteger.ModPow(random, this._exponent, this._modulus) * input), this._modulus);
+                BigInteger blindedInput = BigInteger.PositiveMod((BigInteger.ModPow(random, this._key.Exponent, this._key.Modulus) * input), this._key.Modulus);
 
                 // mP = ((input Mod p) ^ dP)) Mod p
-                var mP = BigInteger.ModPow((blindedInput % this._p), this._dp, this._p);
+                var mP = BigInteger.ModPow((blindedInput % this._key.P), this._key.DP, this._key.P);
 
                 // mQ = ((input Mod q) ^ dQ)) Mod q
-                var mQ = BigInteger.ModPow((blindedInput % this._q), this._dq, this._q);
+                var mQ = BigInteger.ModPow((blindedInput % this._key.Q), this._key.DQ, this._key.Q);
 
-                var h = BigInteger.PositiveMod(((mP - mQ) * this._inverseQ), this._p);
+                var h = BigInteger.PositiveMod(((mP - mQ) * this._key.InverseQ), this._key.P);
 
-                var m = h * this._q + mQ;
+                var m = h * this._key.Q + mQ;
 
-                BigInteger rInv = BigInteger.ModInverse(random, this._modulus);
+                BigInteger rInv = BigInteger.ModInverse(random, this._key.Modulus);
 
-                result = BigInteger.PositiveMod((m * rInv), this._modulus);
+                result = BigInteger.PositiveMod((m * rInv), this._key.Modulus);
             }
             else
             {
-                result = BigInteger.ModPow(input, this._exponent, this._modulus);
+                result = BigInteger.ModPow(input, this._key.Exponent, this._key.Modulus);
             }
             
             return result.ToByteArray().Reverse().ToArray();
         }
-
     }
 }

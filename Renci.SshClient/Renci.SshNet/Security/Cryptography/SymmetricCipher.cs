@@ -11,29 +11,21 @@ namespace Renci.SshNet.Security.Cryptography
     public abstract class SymmetricCipher : Cipher
     {
         /// <summary>
-        /// Gets the size of the key in bits.
+        /// Gets the key.
         /// </summary>
-        /// <value>
-        /// The size of the key in bits.
-        /// </value>
-        public int KeySize { get; private set; }
+        protected byte[] Key { get; private set; }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SymmetricCipher"/> class.
         /// </summary>
         /// <param name="key">The key.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
         protected SymmetricCipher(byte[] key)
         {
-            var keySize = key.Length * 8;
+            if (key == null)
+                throw new ArgumentNullException("key");
 
-            if (this.ValidateKeySize(keySize))
-            {
-                this.KeySize = keySize;
-            }
-            else
-            {
-                throw new ArgumentException(string.Format("KeySize '{0}' is not valid for this algorithm.", keySize));
-            }
+            this.Key = key;
         }
 
         /// <summary>
@@ -61,12 +53,5 @@ namespace Renci.SshNet.Security.Cryptography
         /// The number of bytes decrypted.
         /// </returns>
         public abstract int DecryptBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset);
-
-        /// <summary>
-        /// Validates the size of the key.
-        /// </summary>
-        /// <param name="keySize">Size of the key.</param>
-        /// <returns>true if keySize is valid; otherwise false</returns>
-        protected abstract bool ValidateKeySize(int keySize);
     }
 }

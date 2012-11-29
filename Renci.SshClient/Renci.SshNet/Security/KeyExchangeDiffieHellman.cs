@@ -7,6 +7,7 @@ using Renci.SshNet.Messages.Transport;
 using System.Diagnostics;
 using Renci.SshNet.Messages;
 using Renci.SshNet.Common;
+using Renci.SshNet.Security.Cryptography;
 
 namespace Renci.SshNet.Security
 {
@@ -72,19 +73,23 @@ namespace Renci.SshNet.Security
         {
             var exchangeHash = this.CalculateHash();
 
-            var bytes = this._hostKey;
-
             var length = (uint)(this._hostKey[0] << 24 | this._hostKey[1] << 16 | this._hostKey[2] << 8 | this._hostKey[3]);
 
-            var algorithmName = Renci.SshNet.Common.ASCIIEncoding.Current.GetString(bytes.Skip(4).Take((int)length).ToArray());
+            var algorithmName = Encoding.UTF8.GetString(this._hostKey, 4, (int)length);
 
-            var data = bytes.Skip(4 + algorithmName.Length);
+            var key = this.Session.ConnectionInfo.HostKeyAlgorithms[algorithmName](this._hostKey);
 
-            CryptoPublicKey key = this.Session.ConnectionInfo.HostKeyAlgorithms[algorithmName].CreateInstance<CryptoPublicKey>();
+            this.Session.ConnectionInfo.CurrentHostKeyAlgorithm = algorithmName;
 
-            key.Load(data);
+            if (this.CanTrustHostKey(key))
+            {
 
-            return key.VerifySignature(exchangeHash, this._signature);
+                return key.VerifySignature(exchangeHash, this._signature);
+            }
+            else
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -111,12 +116,12 @@ namespace Renci.SshNet.Security
             if (this._prime.IsZero)
                 throw new ArgumentNullException("_prime");
 
-            var bytesArray = new byte[128];
+            var bitLength = this._prime.BitLength;
+
             do
             {
-                _randomizer.GetBytes(bytesArray);
-                bytesArray[bytesArray.Length - 1] = (byte)(bytesArray[bytesArray.Length - 1] & 0x7F);   //  Ensure not a negative value
-                this._randomValue = new BigInteger(bytesArray);
+                this._randomValue = BigInteger.Random(bitLength);
+
                 this._clientExchangeValue = BigInteger.ModPow(this._group, this._randomValue, this._prime);
 
             } while (this._clientExchangeValue < 1 || this._clientExchangeValue > ((this._prime - 1)));

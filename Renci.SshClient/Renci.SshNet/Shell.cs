@@ -129,7 +129,8 @@ namespace Renci.SshNet
             this._session.ErrorOccured += Session_ErrorOccured;
 
             this._channel.Open();
-            this._channel.SendPseudoTerminalRequest(this._terminalName, this._columns, this._rows, this._width, this._height, this._terminalMode);
+            //  TODO:   Terminal mode is ignored as this functionality will be obsolete
+            this._channel.SendPseudoTerminalRequest(this._terminalName, this._columns, this._rows, this._width, this._height);
             this._channel.SendShellRequest();
 
             this._channelClosedWaitHandle = new AutoResetEvent(false);
@@ -160,6 +161,8 @@ namespace Renci.SshNet
             //  If channel is open then close it to cause Channel_Closed method to be called
             if (this._channel != null && this._channel.IsOpen)
             {
+                this._channel.SendEof();
+
                 this._channel.Close();
             }
         }
@@ -207,15 +210,18 @@ namespace Renci.SshNet
             }
 
             if (this._channel.IsOpen)
+            {
+                this._channel.SendEof();
+
                 this._channel.Close();
+            }
 
             this._channelClosedWaitHandle.Set();
 
             this._input.Dispose();
             this._input = null;
 
-            //  TODO:   Add timeout to WaitOne method
-            this._dataReaderTaskCompleted.WaitOne();
+            this._dataReaderTaskCompleted.WaitOne(this._session.ConnectionInfo.Timeout);
             this._dataReaderTaskCompleted.Dispose();
             this._dataReaderTaskCompleted = null;
 
@@ -267,6 +273,12 @@ namespace Renci.SshNet
                     {
                         this._channelClosedWaitHandle.Dispose();
                         this._channelClosedWaitHandle = null;
+                    }
+
+                    if (this._channel != null)
+                    {
+                        this._channel.Dispose();
+                        this._channel = null;
                     }
 
                     if (this._dataReaderTaskCompleted != null)

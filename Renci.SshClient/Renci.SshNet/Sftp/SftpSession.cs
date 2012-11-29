@@ -13,25 +13,13 @@ using Renci.SshNet.Sftp.Requests;
 
 namespace Renci.SshNet.Sftp
 {
-    internal class SftpSession : IDisposable
+    internal class SftpSession : SubsystemSession
     {
-        private Session _session;
-
-        private ChannelSession _channel;
-
         private Dictionary<uint, SftpRequest> _requests = new Dictionary<uint, SftpRequest>();
 
         private List<byte> _data = new List<byte>(32 * 1024);
 
-        private Exception _exception;
-
-        private EventWaitHandle _errorOccuredWaitHandle = new AutoResetEvent(false);
-
         private EventWaitHandle _sftpVersionConfirmed = new AutoResetEvent(false);
-
-        private TimeSpan _operationTimeout;
-
-        public event EventHandler<ExceptionEventArgs> ErrorOccured;
 
         /// <summary>
         /// Gets remote working directory.
@@ -43,7 +31,7 @@ namespace Renci.SshNet.Sftp
         /// </summary>
         public int ProtocolVersion { get; private set; }
 
-        private uint _requestId;
+        private long _requestId;
         /// <summary>
         /// Gets the next request id for sftp session.
         /// </summary>
@@ -51,55 +39,22 @@ namespace Renci.SshNet.Sftp
         {
             get
             {
-                return this._requestId++;
+#if WINDOWS_PHONE
+                lock (this)
+                {
+                    this._requestId++;
+                }
+
+                return (uint)this._requestId;
+#else
+                return ((uint)Interlocked.Increment(ref this._requestId));
+#endif
             }
         }
 
-        #region SFTP messages
-
-        //internal event EventHandler<MessageEventArgs<StatusMessage>> StatusMessageReceived;
-
-        //internal event EventHandler<MessageEventArgs<DataMessage>> DataMessageReceived;
-
-        //internal event EventHandler<MessageEventArgs<HandleMessage>> HandleMessageReceived;
-
-        //internal event EventHandler<MessageEventArgs<NameMessage>> NameMessageReceived;
-
-        //internal event EventHandler<MessageEventArgs<AttributesMessage>> AttributesMessageReceived;
-
-        #endregion
-
         public SftpSession(Session session, TimeSpan operationTimeout)
+            : base(session, "sftp", operationTimeout)
         {
-            this._session = session;
-            this._operationTimeout = operationTimeout;
-        }
-
-        public void Connect()
-        {
-            this._channel = this._session.CreateChannel<ChannelSession>();
-
-            this._session.ErrorOccured += Session_ErrorOccured;
-            this._session.Disconnected += Session_Disconnected;
-            this._channel.DataReceived += Channel_DataReceived;
-
-            this._channel.Open();
-
-            this._channel.SendSubsystemRequest("sftp");
-
-            this.SendMessage(new SftpInitRequest(3));
-
-            this.WaitHandle(this._sftpVersionConfirmed, this._operationTimeout);
-
-            this.ProtocolVersion = 3;
-
-            //  Resolve current directory
-            this.WorkingDirectory = this.RequestRealPath(".").Keys.First();
-        }
-
-        public void Disconnect()
-        {
-            this.Dispose();
         }
 
         public void ChangeDirectory(string path)
@@ -113,96 +68,16 @@ namespace Renci.SshNet.Sftp
             this.WorkingDirectory = fullPath;
         }
 
-        private void Channel_DataReceived(object sender, Common.ChannelDataEventArgs e)
-        {
-            //  Add channel data to internal data holder
-            this._data.AddRange(e.Data);
-
-            while (this._data.Count > 4 + 1)
-            {
-                //  Extract packet length
-                var packetLength = (this._data[0] << 24 | this._data[1] << 16 | this._data[2] << 8 | this._data[3]);
-
-                //  Check if complete packet data is available
-                if (this._data.Count < packetLength + 4)
-                {
-                    //  Wait for complete message to arrive first
-                    break;
-                }
-                this._data.RemoveRange(0, 4);
-
-                //  Create buffer to hold packet data
-                var packetData = new byte[packetLength];
-
-                //  Cope packet data to array
-                this._data.CopyTo(0, packetData, 0, packetLength);
-
-                //  Remove loaded data from _data holder
-                this._data.RemoveRange(0, packetLength);
-
-                //  Load SFTP Message and handle it
-                dynamic response = SftpMessage.Load(packetData);
-
-                try
-                {
-                    if (response is SftpVersionResponse)
-                    {
-                        if (response.Version == 3)
-                        {
-                            this._sftpVersionConfirmed.Set();
-                        }
-                        else
-                        {
-                            throw new NotSupportedException(string.Format(CultureInfo.CurrentCulture, "Server SFTP version {0} is not supported.", response.Version));
-                        }
-                    }
-                    else
-                    {
-                        this.HandleResponse(response);
-                    }
-                }
-                catch (Exception exp)
-                {
-                    this.RaiseError(exp);
-                    break;
-                }
-            }
-        }
-
-        private void SendRequest(SftpRequest request)
-        {
-            lock (this._requests)
-            {
-                this._requests.Add(request.RequestId, request);
-            }
-
-            this._session.SendMessage(new SftpDataMessage(this._channel.RemoteChannelNumber, request));
-        }
-
         internal void SendMessage(SftpMessage sftpMessage)
         {
-            this._session.SendMessage(new SftpDataMessage(this._channel.RemoteChannelNumber, sftpMessage));
-        }
+            var messageData = sftpMessage.GetBytes();
 
-        internal void WaitHandle(WaitHandle waitHandle, TimeSpan operationTimeout)
-        {
-            var waitHandles = new WaitHandle[]
-                {
-                    this._errorOccuredWaitHandle,
-                    waitHandle,
-                };
+            var data = new byte[4 + messageData.Length];
 
-            var index = EventWaitHandle.WaitAny(waitHandles, operationTimeout);
+            ((uint)messageData.Length).GetBytes().CopyTo(data, 0);
+            messageData.CopyTo(data, 4);
 
-            if (index < 1)
-            {
-                throw this._exception;
-            }
-            else if (index > 1)
-            {
-                //  throw time out error
-                throw new SshOperationTimeoutException(string.Format(CultureInfo.CurrentCulture, "Sftp operation has timed out."));
-            }
+            this.SendData(data);
         }
 
         /// <summary>
@@ -229,10 +104,10 @@ namespace Renci.SshNet.Sftp
             var canonizedPath = string.Empty;
 
             var realPathFiles = this.RequestRealPath(fullPath, true);
-            
-            if ( realPathFiles != null)
+
+            if (realPathFiles != null)
             {
-                canonizedPath = realPathFiles.Keys.First();
+                canonizedPath = realPathFiles.First().Key;                
             }
 
             if (!string.IsNullOrEmpty(canonizedPath))
@@ -252,15 +127,12 @@ namespace Renci.SshNet.Sftp
             if (string.IsNullOrEmpty(partialFullPath))
                 partialFullPath = "/";
 
-            //canonizedPath = this.RequestRealPath(partialFullPath).First().FullName;
-
             realPathFiles = this.RequestRealPath(partialFullPath, true);
 
             if (realPathFiles != null)
             {
-                canonizedPath = realPathFiles.Keys.First();
+                canonizedPath = realPathFiles.First().Key;
             }
-
 
             if (string.IsNullOrEmpty(canonizedPath))
             {
@@ -288,6 +160,110 @@ namespace Renci.SshNet.Sftp
 
                 return true;
             }
+        }
+
+        protected override void OnChannelOpen()
+        {
+            this.SendMessage(new SftpInitRequest(3));
+
+            this.WaitHandle(this._sftpVersionConfirmed, this._operationTimeout);
+
+            this.ProtocolVersion = 3;
+
+            //  Resolve current directory
+            this.WorkingDirectory = this.RequestRealPath(".").First().Key;
+        }
+
+        protected override void OnDataReceived(uint dataTypeCode, byte[] data)
+        {
+            //  Add channel data to internal data holder
+            this._data.AddRange(data);
+
+            while (this._data.Count > 4 + 1)
+            {
+                //  Extract packet length
+                var packetLength = (this._data[0] << 24 | this._data[1] << 16 | this._data[2] << 8 | this._data[3]);
+
+                //  Check if complete packet data is available
+                if (this._data.Count < packetLength + 4)
+                {
+                    //  Wait for complete message to arrive first
+                    break;
+                }
+                this._data.RemoveRange(0, 4);
+
+                //  Create buffer to hold packet data
+                var packetData = new byte[packetLength];
+
+                //  Cope packet data to array
+                this._data.CopyTo(0, packetData, 0, packetLength);
+
+                //  Remove loaded data from _data holder
+                this._data.RemoveRange(0, packetLength);
+
+                //  Load SFTP Message and handle it
+                var response = SftpMessage.Load(packetData);
+
+                try
+                {
+                    var versionResponse = response as SftpVersionResponse;
+                    if (versionResponse != null)
+                    {
+                        if (versionResponse.Version == 3)
+                        {
+                            this._sftpVersionConfirmed.Set();
+                        }
+                        else
+                        {
+                            throw new NotSupportedException(string.Format(CultureInfo.CurrentCulture, "Server SFTP version {0} is not supported.", versionResponse.Version));
+                        }
+                    }
+                    else
+                    {
+                        this.HandleResponse(response as SftpResponse);
+                    }
+                }
+                catch (Exception exp)
+                {
+                    this.RaiseError(exp);
+                    break;
+                }
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+
+            if (disposing)
+            {
+                if (this._sftpVersionConfirmed != null)
+                {
+                    this._sftpVersionConfirmed.Dispose();
+                    this._sftpVersionConfirmed = null;
+                }
+            }
+        }
+
+        private void SendRequest(SftpRequest request)
+        {
+            lock (this._requests)
+            {
+                this._requests.Add(request.RequestId, request);
+            }
+
+            this.SendMessage(request);
+            //this.SendData(new SftpDataMessage(this.ChannelNumber, request));
+
+            //var messageData = request.GetBytes();
+
+            //var data = new byte[4 + messageData.Length];
+
+            //((uint)messageData.Length).GetBytes().CopyTo(data, 0);
+            //messageData.CopyTo(data, 4);
+
+            //this.SendData(data);
+
         }
 
         #region SFTP API functions
@@ -370,7 +346,7 @@ namespace Renci.SshNet.Sftp
         /// <returns>data array; null if EOF</returns>
         internal byte[] RequestRead(byte[] handle, UInt64 offset, UInt32 length)
         {
-            byte[] data = null;
+            byte[] data = new byte[0];
 
             using (var wait = new AutoResetEvent(false))
             {
@@ -405,17 +381,21 @@ namespace Renci.SshNet.Sftp
         /// </summary>
         /// <param name="handle">The handle.</param>
         /// <param name="offset">The offset.</param>
-        /// <param name="data">The data.</param>
-        internal void RequestWrite(byte[] handle, UInt64 offset, byte[] data)
+        /// <param name="data">The data to send.</param>
+        /// <param name="wait">The wait event handle if needed.</param>
+        internal void RequestWrite(byte[] handle, UInt64 offset, byte[] data, EventWaitHandle wait)
         {
-            using (var wait = new AutoResetEvent(false))
+            var maximumDataSize = 1024 * 32 - 52;
+
+            if (data.Length < maximumDataSize + 1)
             {
                 var request = new SftpWriteRequest(this.NextRequestId, handle, offset, data,
                     (response) =>
                     {
                         if (response.StatusCode == StatusCodes.Ok)
                         {
-                            wait.Set();
+                            if (wait != null)
+                                wait.Set();
                         }
                         else
                         {
@@ -425,7 +405,39 @@ namespace Renci.SshNet.Sftp
 
                 this.SendRequest(request);
 
-                this.WaitHandle(wait, this._operationTimeout);
+                if (wait != null)
+                    this.WaitHandle(wait, this._operationTimeout);
+            }
+            else
+            {
+                var block = data.Length / maximumDataSize + 1;
+
+                for (int i = 0; i < block; i++)
+                {
+                    var blockBufferSize = Math.Min(data.Length - maximumDataSize * i, maximumDataSize);
+                    var blockBuffer = new byte[blockBufferSize];
+
+                    Buffer.BlockCopy(data, i * maximumDataSize, blockBuffer, 0, blockBufferSize);
+
+                    var request = new SftpWriteRequest(this.NextRequestId, handle, offset + (ulong)(i * maximumDataSize), blockBuffer,
+                        (response) =>
+                        {
+                            if (response.StatusCode == StatusCodes.Ok)
+                            {
+                                if (wait != null)
+                                    wait.Set();
+                            }
+                            else
+                            {
+                                this.ThrowSftpException(response);
+                            }
+                        });
+
+                    this.SendRequest(request);
+
+                    if (wait != null)
+                        this.WaitHandle(wait, this._operationTimeout);
+                }
             }
         }
 
@@ -592,9 +604,9 @@ namespace Renci.SshNet.Sftp
         /// </summary>
         /// <param name="handle">The handle.</param>
         /// <returns></returns>
-        internal IDictionary<string, SftpFileAttributes> RequestReadDir(byte[] handle)
+        internal KeyValuePair<string, SftpFileAttributes>[] RequestReadDir(byte[] handle)
         {
-            IDictionary<string, SftpFileAttributes> result = null;
+            KeyValuePair<string, SftpFileAttributes>[] result = null;
 
             using (var wait = new AutoResetEvent(false))
             {
@@ -711,9 +723,9 @@ namespace Renci.SshNet.Sftp
         /// <param name="path">The path.</param>
         /// <param name="nullOnError">if set to <c>true</c> returns null instead of throwing an exception.</param>
         /// <returns></returns>
-        internal IDictionary<string, SftpFileAttributes> RequestRealPath(string path, bool nullOnError = false)
+        internal KeyValuePair<string, SftpFileAttributes>[] RequestRealPath(string path, bool nullOnError = false)
         {
-            IDictionary<string, SftpFileAttributes> result = null;
+            KeyValuePair<string, SftpFileAttributes>[] result = null;
 
             using (var wait = new AutoResetEvent(false))
             {
@@ -817,9 +829,9 @@ namespace Renci.SshNet.Sftp
         /// <param name="path">The path.</param>
         /// <param name="nullOnError">if set to <c>true</c> returns null instead of throwing an exception.</param>
         /// <returns></returns>
-        internal IDictionary<string, SftpFileAttributes> RequestReadLink(string path, bool nullOnError = false)
+        internal KeyValuePair<string, SftpFileAttributes>[] RequestReadLink(string path, bool nullOnError = false)
         {
-            IDictionary<string, SftpFileAttributes> result = null;
+            KeyValuePair<string, SftpFileAttributes>[] result = null;
 
             using (var wait = new AutoResetEvent(false))
             {
@@ -913,97 +925,5 @@ namespace Renci.SshNet.Sftp
 
             request.Complete(response);
         }
-
-        private void Session_Disconnected(object sender, EventArgs e)
-        {
-            this.RaiseError(new SshException("Connection was lost"));
-        }
-
-        private void Session_ErrorOccured(object sender, ExceptionEventArgs e)
-        {
-            this.RaiseError(e.Exception);
-        }
-
-        private void RaiseError(Exception error)
-        {
-            this._exception = error;
-
-            this._errorOccuredWaitHandle.Set();
-
-            if (this.ErrorOccured != null)
-            {
-                this.ErrorOccured(this, new ExceptionEventArgs(error));
-            }
-        }
-
-        #region IDisposable Members
-
-        private bool _isDisposed = false;
-
-        /// <summary>
-        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
-        /// </summary>
-        public void Dispose()
-        {
-            Dispose(true);
-
-            GC.SuppressFinalize(this);
-        }
-
-        /// <summary>
-        /// Releases unmanaged and - optionally - managed resources
-        /// </summary>
-        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
-        protected virtual void Dispose(bool disposing)
-        {
-            // Check to see if Dispose has already been called.
-            if (!this._isDisposed)
-            {
-                if (this._channel != null)
-                {
-                    this._channel.DataReceived -= Channel_DataReceived;
-
-                    this._channel.Dispose();
-                    this._channel = null;
-                }
-
-                this._session.ErrorOccured -= Session_ErrorOccured;
-                this._session.Disconnected -= Session_Disconnected;
-
-                // If disposing equals true, dispose all managed
-                // and unmanaged resources.
-                if (disposing)
-                {
-                    // Dispose managed resources.
-                    if (this._errorOccuredWaitHandle != null)
-                    {
-                        this._errorOccuredWaitHandle.Dispose();
-                        this._errorOccuredWaitHandle = null;
-                    }
-                    if (this._sftpVersionConfirmed != null)
-                    {
-                        this._sftpVersionConfirmed.Dispose();
-                        this._sftpVersionConfirmed = null;
-                    }
-                }
-
-                // Note disposing has been done.
-                _isDisposed = true;
-            }
-        }
-
-        /// <summary>
-        /// Releases unmanaged resources and performs other cleanup operations before the
-        /// <see cref="SftpSession"/> is reclaimed by garbage collection.
-        /// </summary>
-        ~SftpSession()
-        {
-            // Do not re-create Dispose clean-up code here.
-            // Calling Dispose(false) is optimal in terms of
-            // readability and maintainability.
-            Dispose(false);
-        }
-
-        #endregion
     }
 }

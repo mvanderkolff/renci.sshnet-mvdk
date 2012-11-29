@@ -94,6 +94,11 @@ namespace Renci.SshNet
         private EventWaitHandle _keyExchangeCompletedWaitHandle = new ManualResetEvent(false);
 
         /// <summary>
+        /// WaitHandle to signal that key exchange is in progress.
+        /// </summary>
+        private bool _keyExchangeInProgress = false;
+
+        /// <summary>
         /// Exception that need to be thrown by waiting thread
         /// </summary>
         private Exception _exception;
@@ -178,7 +183,7 @@ namespace Renci.SshNet
         {
             get
             {
-                return this._socket != null && this._socket.Connected && this._isAuthenticated && this._messageListenerCompleted != null;
+                return (!this._isDisconnecting && this._socket != null && this._socket.Connected && this._isAuthenticated && this._messageListenerCompleted != null) && !(this._socket.Poll(10, SelectMode.SelectRead));
             }
         }
 
@@ -201,14 +206,14 @@ namespace Renci.SshNet
                 {
                     this._clientInitMessage = new KeyExchangeInitMessage()
                     {
-                        KeyExchangeAlgorithms = this.ConnectionInfo.KeyExchangeAlgorithms.Keys,
-                        ServerHostKeyAlgorithms = this.ConnectionInfo.HostKeyAlgorithms.Keys,
-                        EncryptionAlgorithmsClientToServer = this.ConnectionInfo.Encryptions.Keys,
-                        EncryptionAlgorithmsServerToClient = this.ConnectionInfo.Encryptions.Keys,
-                        MacAlgorithmsClientToServer = this.ConnectionInfo.HmacAlgorithms.Keys,
-                        MacAlgorithmsServerToClient = this.ConnectionInfo.HmacAlgorithms.Keys,
-                        CompressionAlgorithmsClientToServer = this.ConnectionInfo.CompressionAlgorithms.Keys,
-                        CompressionAlgorithmsServerToClient = this.ConnectionInfo.CompressionAlgorithms.Keys,
+                        KeyExchangeAlgorithms = this.ConnectionInfo.KeyExchangeAlgorithms.Keys.ToArray(),
+                        ServerHostKeyAlgorithms = this.ConnectionInfo.HostKeyAlgorithms.Keys.ToArray(),
+                        EncryptionAlgorithmsClientToServer = this.ConnectionInfo.Encryptions.Keys.ToArray(),
+                        EncryptionAlgorithmsServerToClient = this.ConnectionInfo.Encryptions.Keys.ToArray(),
+                        MacAlgorithmsClientToServer = this.ConnectionInfo.HmacAlgorithms.Keys.ToArray(),
+                        MacAlgorithmsServerToClient = this.ConnectionInfo.HmacAlgorithms.Keys.ToArray(),
+                        CompressionAlgorithmsClientToServer = this.ConnectionInfo.CompressionAlgorithms.Keys.ToArray(),
+                        CompressionAlgorithmsServerToClient = this.ConnectionInfo.CompressionAlgorithms.Keys.ToArray(),
                         LanguagesClientToServer = new string[] { string.Empty },
                         LanguagesServerToClient = new string[] { string.Empty },
                         FirstKexPacketFollows = false,
@@ -246,6 +251,11 @@ namespace Renci.SshNet
         /// Occurs when session has been disconnected form the server.
         /// </summary>
         public event EventHandler<EventArgs> Disconnected;
+
+        /// <summary>
+        /// Occurs when host key received.
+        /// </summary>
+        public event EventHandler<HostKeyEventArgs> HostKeyReceived;
 
         #region Message events
 
@@ -393,7 +403,8 @@ namespace Renci.SshNet
         internal Session(ConnectionInfo connectionInfo)
         {
             this.ConnectionInfo = connectionInfo;
-            this.ClientVersion = string.Format(CultureInfo.CurrentCulture, "SSH-2.0-Renci.SshNet.SshClient.{0}", this.GetType().Assembly.GetName().Version);
+            //this.ClientVersion = string.Format(CultureInfo.CurrentCulture, "SSH-2.0-Renci.SshNet.SshClient.{0}", this.GetType().Assembly.GetName().Version);
+            this.ClientVersion = string.Format(CultureInfo.CurrentCulture, "SSH-2.0-Renci.SshNet.SshClient.0.0.1");
         }
 
         /// <summary>
@@ -401,6 +412,7 @@ namespace Renci.SshNet
         /// </summary>
         public void Connect()
         {
+            //   TODO: Add exception documentation for Proxy.
             if (this.ConnectionInfo == null)
             {
                 throw new ArgumentNullException("connectionInfo");
@@ -422,42 +434,71 @@ namespace Renci.SshNet
                     if (this.IsConnected)
                         return;
 
-                    this.OpenSocket();
+                    //  Build list of available messages while connecting
+                    this._messagesMetadata = GetMessagesMetadata();
+
+                    switch (this.ConnectionInfo.ProxyType)
+                    {
+                        case ProxyTypes.None:
+                            this.SocketConnect(this.ConnectionInfo.Host, this.ConnectionInfo.Port);
+                            break;
+                        case ProxyTypes.Socks4:
+                            this.SocketConnect(this.ConnectionInfo.ProxyHost, this.ConnectionInfo.ProxyPort);
+                            this.ConnectSocks4(this._socket);
+                            break;
+                        case ProxyTypes.Socks5:
+                            this.SocketConnect(this.ConnectionInfo.ProxyHost, this.ConnectionInfo.ProxyPort);
+                            this.ConnectSocks5(this._socket);
+                            break;
+                        case ProxyTypes.Http:
+                            this.SocketConnect(this.ConnectionInfo.ProxyHost, this.ConnectionInfo.ProxyPort);
+                            this.ConnectHttp(this._socket);
+                            break;
+                        default:
+                            break;
+                    }
+
 
                     Match versionMatch = null;
+
                     //  Get server version from the server,
                     //  ignore text lines which are sent before if any
-                    using (var ns = new NetworkStream(this._socket))
+                    while (true)
                     {
-                        using (var sr = new StreamReader(ns))
+                        string serverVersion = string.Empty;
+                        this.SocketReadLine(ref serverVersion);
+
+                        this.ServerVersion = serverVersion;
+                        if (string.IsNullOrEmpty(this.ServerVersion))
                         {
-                            while (true)
-                            {
-                                this.ServerVersion = sr.ReadLine();
-                                if (string.IsNullOrEmpty(this.ServerVersion))
-                                {
-                                    throw new InvalidOperationException("Server string is null or empty.");
-                                }
+                            throw new InvalidOperationException("Server string is null or empty.");
+                        }
 
-                                versionMatch = _serverVersionRe.Match(this.ServerVersion);
+                        versionMatch = _serverVersionRe.Match(this.ServerVersion);
 
-                                if (versionMatch.Success)
-                                {
-                                    break;
-                                }
-                            }
+                        if (versionMatch.Success)
+                        {
+                            break;
                         }
                     }
 
+                    //  Set connection versions
+                    this.ConnectionInfo.ServerVersion = this.ServerVersion;
+                    this.ConnectionInfo.ClientVersion = this.ClientVersion;
+
                     //  Get server SSH version
                     var version = versionMatch.Result("${protoversion}");
+
+                    var softwareName = versionMatch.Result("${softwareversion}");
+
+                    this.Log(string.Format("Server version '{0}' on '{1}'.", version, softwareName));
 
                     if (!(version.Equals("2.0") || version.Equals("1.99")))
                     {
                         throw new SshConnectionException(string.Format(CultureInfo.CurrentCulture, "Server version '{0}' is not supported.", version), DisconnectReason.ProtocolVersionNotSupported);
                     }
 
-                    this.Write(Renci.SshNet.Common.ASCIIEncoding.Current.GetBytes(string.Format(CultureInfo.InvariantCulture, "{0}\x0D\x0A", this.ClientVersion)));
+                    this.SocketWrite(Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "{0}\x0D\x0A", this.ClientVersion)));
 
                     //  Register Transport response messages
                     this.RegisterMessage("SSH_MSG_DISCONNECT");
@@ -507,28 +548,7 @@ namespace Renci.SshNet
                         throw new SshException("Username is not specified.");
                     }
 
-                    //  Try authenticate using none method
-                    using (var noneConnectionInfo = new NoneConnectionInfo(this.ConnectionInfo.Host, this.ConnectionInfo.Port, this.ConnectionInfo.Username))
-                    {
-                        noneConnectionInfo.Authenticate(this);
-
-                        this._isAuthenticated = noneConnectionInfo.IsAuthenticated;
-
-                        if (!this._isAuthenticated)
-                        {
-                            //  Ensure that authentication method is allowed
-                            if (!noneConnectionInfo.AllowedAuthentications.Contains(this.ConnectionInfo.Name))
-                            {
-                                throw new SshAuthenticationException("User authentication method is not supported.");
-                            }
-
-                            //  In future, if more then one authentication methods are supported perform the check here.
-                            //  Authenticate using provided connection info object
-                            this.ConnectionInfo.Authenticate(this);
-
-                            this._isAuthenticated = this.ConnectionInfo.IsAuthenticated;
-                        }
-                    }
+                    this._isAuthenticated = this.ConnectionInfo.Authenticate(this);
 
                     if (!this._isAuthenticated)
                     {
@@ -564,7 +584,12 @@ namespace Renci.SshNet
         /// </summary>
         public void Disconnect()
         {
-            this.Dispose();
+            this._isDisconnecting = true;
+
+            //  If socket still open try to send disconnect message to the server
+            this.SendDisconnect(DisconnectReason.ByApplication, "Connection terminated by the client.");
+
+            //this.Dispose();
         }
 
         internal T CreateChannel<T>() where T : Channel, new()
@@ -624,6 +649,14 @@ namespace Renci.SshNet
         {
             if (this._socket == null || !this._socket.Connected)
                 return;
+
+            if (this._keyExchangeInProgress && !(message is IKeyExchangedAllowed))
+            {
+                //  Wait for key exchange to be completed
+                this.WaitHandle(this._keyExchangeCompletedWaitHandle);
+            }
+
+            this.Log(string.Format("SendMessage to server '{0}': '{1}'.", message.GetType().Name, message.ToString()));
 
             //  Messages can be sent by different thread so we need to synchronize it            
             var paddingMultiplier = this._clientCipher == null ? (byte)8 : (byte)this._clientCipher.BlockSize;    //    Should be recalculate base on cipher min length if cipher specified
@@ -685,7 +718,7 @@ namespace Renci.SshNet
 
                 if (this._clientMac == null)
                 {
-                    this.Write(packetData);
+                    this.SocketWrite(packetData);
                 }
                 else
                 {
@@ -695,13 +728,56 @@ namespace Renci.SshNet
                     packetData.CopyTo(data, 0);
                     hash.CopyTo(data, packetData.Length);
 
-                    this.Write(data);
+                    this.SocketWrite(data);
                 }
 
                 this._outboundPacketSequence++;
 
                 Monitor.Pulse(this._socket);
             }
+        }
+
+        private static IEnumerable<MessageMetadata> GetMessagesMetadata()
+        {
+            return new MessageMetadata[] 
+                { 
+                    new MessageMetadata { Name = "SSH_MSG_NEWKEYS", Number = 21, Enabled = false, Activated = false, Type = typeof(NewKeysMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_REQUEST_FAILURE", Number = 82, Enabled = false, Activated = false, Type = typeof(RequestFailureMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_KEXINIT", Number = 20, Enabled = false, Activated = false, Type = typeof(KeyExchangeInitMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_OPEN_FAILURE", Number = 92, Enabled = false, Activated = false, Type = typeof(ChannelOpenFailureMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_FAILURE", Number = 100, Enabled = false, Activated = false, Type = typeof(ChannelFailureMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_EXTENDED_DATA", Number = 95, Enabled = false, Activated = false, Type = typeof(ChannelExtendedDataMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_DATA", Number = 94, Enabled = false, Activated = false, Type = typeof(ChannelDataMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_REQUEST", Number = 50, Enabled = false, Activated = false, Type = typeof(RequestMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_REQUEST", Number = 98, Enabled = false, Activated = false, Type = typeof(ChannelRequestMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_BANNER", Number = 53, Enabled = false, Activated = false, Type = typeof(BannerMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_INFO_RESPONSE", Number = 61, Enabled = false, Activated = false, Type = typeof(InformationResponseMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_FAILURE", Number = 51, Enabled = false, Activated = false, Type = typeof(FailureMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_DEBUG", Number = 4, Enabled = false, Activated = false, Type = typeof(DebugMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_KEXDH_INIT", Number = 30, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhInitMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_GLOBAL_REQUEST", Number = 80, Enabled = false, Activated = false, Type = typeof(GlobalRequestMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_OPEN", Number = 90, Enabled = false, Activated = false, Type = typeof(ChannelOpenMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_OPEN_CONFIRMATION", Number = 91, Enabled = false, Activated = false, Type = typeof(ChannelOpenConfirmationMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_INFO_REQUEST", Number = 60, Enabled = false, Activated = false, Type = typeof(InformationRequestMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_UNIMPLEMENTED", Number = 3, Enabled = false, Activated = false, Type = typeof(UnimplementedMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_REQUEST_SUCCESS", Number = 81, Enabled = false, Activated = false, Type = typeof(RequestSuccessMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_SUCCESS", Number = 99, Enabled = false, Activated = false, Type = typeof(ChannelSuccessMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_PASSWD_CHANGEREQ", Number = 60, Enabled = false, Activated = false, Type = typeof(PasswordChangeRequiredMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_DISCONNECT", Number = 1, Enabled = false, Activated = false, Type = typeof(DisconnectMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_SERVICE_REQUEST", Number = 5, Enabled = false, Activated = false, Type = typeof(ServiceRequestMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_KEX_DH_GEX_REQUEST", Number = 34, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhGroupExchangeRequest), },
+                    new MessageMetadata { Name = "SSH_MSG_KEX_DH_GEX_GROUP", Number = 31, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhGroupExchangeGroup), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_SUCCESS", Number = 52, Enabled = false, Activated = false, Type = typeof(SuccessMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_USERAUTH_PK_OK", Number = 60, Enabled = false, Activated = false, Type = typeof(PublicKeyMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_IGNORE", Number = 2, Enabled = false, Activated = false, Type = typeof(IgnoreMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_WINDOW_ADJUST", Number = 93, Enabled = false, Activated = false, Type = typeof(ChannelWindowAdjustMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_EOF", Number = 96, Enabled = false, Activated = false, Type = typeof(ChannelEofMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_CHANNEL_CLOSE", Number = 97, Enabled = false, Activated = false, Type = typeof(ChannelCloseMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_SERVICE_ACCEPT", Number = 6, Enabled = false, Activated = false, Type = typeof(ServiceAcceptMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_KEXDH_REPLY", Number = 31, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhReplyMessage), },
+                    new MessageMetadata { Name = "SSH_MSG_KEX_DH_GEX_INIT", Number = 32, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhGroupExchangeInit), },
+                    new MessageMetadata { Name = "SSH_MSG_KEX_DH_GEX_REPLY", Number = 33, Enabled = false, Activated = false, Type = typeof(KeyExchangeDhGroupExchangeReply), },
+                };
         }
 
         /// <summary>
@@ -750,7 +826,7 @@ namespace Renci.SshNet
 
                 if (serverHash != null)
                 {
-                    Array.Copy(nextBlocks, nextBlocks.Length - serverHash.Length, serverHash, 0, serverHash.Length);
+                    Buffer.BlockCopy(nextBlocks, nextBlocks.Length - serverHash.Length, serverHash, 0, serverHash.Length);
                     nextBlocks = nextBlocks.Take(nextBlocks.Length - serverHash.Length).ToArray();
                 }
 
@@ -767,7 +843,7 @@ namespace Renci.SshNet
             var paddingLength = data[4];
 
             var messagePayload = new byte[packetLength - paddingLength - 1];
-            Array.Copy(data, 5, messagePayload, 0, messagePayload.Length);
+            Buffer.BlockCopy(data, 5, messagePayload, 0, messagePayload.Length);
 
             if (this._serverDecompression != null)
             {
@@ -810,6 +886,8 @@ namespace Renci.SshNet
             this._isDisconnectMessageSent = true;
         }
 
+        partial void HandleMessageCore(Message message);
+
         /// <summary>
         /// Handles the message.
         /// </summary>
@@ -833,13 +911,13 @@ namespace Renci.SshNet
                 {
                     if (this._socket != null)
                     {
-                        this._socket.Disconnect(true);
+                        this.SocketDisconnect();
 
                         //  When socket is disconnected wait for listener to finish
                         if (this._messageListenerCompleted != null)
                         {
                             //  Wait for listener task to finish
-                            this._messageListenerCompleted.WaitOne();
+                            this.WaitHandle(this._messageListenerCompleted);
                             this._messageListenerCompleted.Dispose();
                             this._messageListenerCompleted = null;
                         }
@@ -997,6 +1075,8 @@ namespace Renci.SshNet
         /// <param name="message"><see cref="DisconnectMessage"/> message.</param>
         protected virtual void OnDisconnectReceived(DisconnectMessage message)
         {
+            this.Log("Disconnect received.");
+
             if (this.DisconnectReceived != null)
             {
                 this.DisconnectReceived(this, new MessageEventArgs<DisconnectMessage>(message));
@@ -1074,6 +1154,8 @@ namespace Renci.SshNet
         /// <param name="message"><see cref="KeyExchangeInitMessage"/> message.</param>
         protected virtual void OnKeyExchangeInitReceived(KeyExchangeInitMessage message)
         {
+            this._keyExchangeInProgress = true;
+
             this._keyExchangeCompletedWaitHandle.Reset();
 
             //  Disable all registered messages except key exchange related
@@ -1095,6 +1177,10 @@ namespace Renci.SshNet
 
             //  Create instance of key exchange algorithm that will be used
             this._keyExchange = this.ConnectionInfo.KeyExchangeAlgorithms[keyExchangeAlgorithmName].CreateInstance<KeyExchange>();
+
+            this.ConnectionInfo.CurrentKeyExchangeAlgorithm = keyExchangeAlgorithmName;
+
+            this._keyExchange.HostKeyReceived += KeyExchange_HostKeyReceived;
 
             //  Start the algorithm implementation
             this._keyExchange.Start(this, message);
@@ -1120,13 +1206,13 @@ namespace Renci.SshNet
             //  Dispose of old ciphers and hash algorithms
             if (this._serverMac != null)
             {
-                this._serverMac.Dispose();
+                this._serverMac.Clear();
                 this._serverMac = null;
             }
 
             if (this._clientMac != null)
             {
-                this._clientMac.Dispose();
+                this._clientMac.Clear();
                 this._clientMac = null;
             }
 
@@ -1141,6 +1227,7 @@ namespace Renci.SshNet
             //  Dispose of old KeyExchange object as it is no longer needed.
             if (this._keyExchange != null)
             {
+                this._keyExchange.HostKeyReceived -= KeyExchange_HostKeyReceived;
                 this._keyExchange.Dispose();
                 this._keyExchange = null;
             }
@@ -1159,6 +1246,8 @@ namespace Renci.SshNet
 
             //  Signal that key exchange completed
             this._keyExchangeCompletedWaitHandle.Set();
+
+            this._keyExchangeInProgress = false;
         }
 
         /// <summary>
@@ -1391,7 +1480,13 @@ namespace Renci.SshNet
 
         #endregion
 
-        #region Read & Write operations
+        private void KeyExchange_HostKeyReceived(object sender, HostKeyEventArgs e)
+        {
+            if (this.HostKeyReceived != null)
+            {
+                this.HostKeyReceived(this, e);
+            }
+        }
 
         /// <summary>
         /// Reads the specified length of bytes from the server
@@ -1402,18 +1497,10 @@ namespace Renci.SshNet
         {
             byte[] buffer = new byte[length];
 
-            this.InternalRead(length, ref buffer);
+            this.SocketRead(length, ref buffer);
 
             return buffer;
         }
-
-        /// <summary>
-        /// Writes the specified data to the server.
-        /// </summary>
-        /// <param name="data">The data.</param>
-        partial void Write(byte[] data);
-
-        #endregion
 
         #region Message loading functions
 
@@ -1452,6 +1539,8 @@ namespace Renci.SshNet
 
             message.Load(data);
 
+            this.Log(string.Format("ReceiveMessage from server: '{0}': '{1}'.", message.GetType().Name, message.ToString()));
+
             return message;
         }
 
@@ -1463,9 +1552,21 @@ namespace Renci.SshNet
 
         partial void ExecuteThread(Action action);
 
-        partial void OpenSocket();
+        partial void SocketConnect(string host, int port);
 
-        partial void InternalRead(int length, ref byte[] buffer);
+        partial void SocketDisconnect();
+
+        partial void SocketRead(int length, ref byte[] buffer);
+
+        partial void SocketReadLine(ref string response);
+
+        partial void Log(string text);
+
+        /// <summary>
+        /// Writes the specified data to the server.
+        /// </summary>
+        /// <param name="data">The data.</param>
+        partial void SocketWrite(byte[] data);
 
         /// <summary>
         /// Listens for incoming message from the server and handles them. This method run as a task on separate thread.
@@ -1482,15 +1583,327 @@ namespace Renci.SshNet
                     {
                         throw new NullReferenceException("The 'message' variable cannot be null");
                     }
-                    else
-                    {
-                        this.HandleMessage((dynamic)message);
-                    }
+
+                    this.HandleMessageCore(message);
                 }
             }
             catch (Exception exp)
             {
                 this.RaiseError(exp);
+            }
+        }
+
+        private byte SocketReadByte()
+        {
+            byte[] buffer = new byte[1];
+
+            this.SocketRead(1, ref buffer);
+
+            return buffer[0];
+        }
+
+        private void SocketWriteByte(byte data)
+        {
+            this.SocketWrite(new byte[] { data });
+        }
+
+        private void ConnectSocks4(Socket socket)
+        {
+            //  Send socks version number
+            this.SocketWriteByte(0x04);
+
+            //  Send command code
+            this.SocketWriteByte(0x01);
+
+            //  Send port
+            this.SocketWriteByte((byte)(this.ConnectionInfo.Port / 0xFF));
+            this.SocketWriteByte((byte)(this.ConnectionInfo.Port % 0xFF));
+
+            //  Send IP
+            IPAddress ipAddress;
+#if SILVERLIGHT
+            if (!IPAddress.TryParse(this.ConnectionInfo.Host, out ipAddress))
+            {
+                throw new ProxyException("SOCKS4: Silverlight supports only IP addresses.");
+            }
+#else
+            ipAddress = Dns.GetHostAddresses(this.ConnectionInfo.Host).First();
+#endif
+            this.SocketWrite(ipAddress.GetAddressBytes());
+
+            //  Send username
+            var username = new Renci.SshNet.Common.ASCIIEncoding().GetBytes(this.ConnectionInfo.ProxyUsername);
+            this.SocketWrite(username);
+            this.SocketWriteByte(0x00);
+
+            //  Read 0
+            if (this.SocketReadByte() != 0)
+            {
+                throw new ProxyException("SOCKS4: Null is expected.");
+            }
+
+            //  Read response code
+            var code = this.SocketReadByte();
+
+            switch (code)
+            {
+                case 0x5a:
+                    break;
+                case 0x5b:
+                    throw new ProxyException("SOCKS4: Connection rejected.");
+                case 0x5c:
+                    throw new ProxyException("SOCKS4: Client is not running identd or not reachable from the server.");
+                case 0x5d:
+                    throw new ProxyException("SOCKS4: Client's identd could not confirm the user ID string in the request.");
+                default:
+                    throw new ProxyException("SOCKS4: Not valid response.");
+            }
+
+            byte[] dummyBuffer = new byte[4];
+
+            //  Read 2 bytes to be ignored
+            this.SocketRead(2, ref dummyBuffer);
+
+            //  Read 4 bytes to be ignored
+            this.SocketRead(4, ref dummyBuffer);
+        }
+
+        private void ConnectSocks5(Socket socket)
+        {
+            //  Send socks version number
+            this.SocketWriteByte(0x05);
+
+            //  Send number of supported authentication methods
+            this.SocketWriteByte(0x02);
+
+            //  Send supported authentication methods
+            this.SocketWriteByte(0x00); //  No authentication
+            this.SocketWriteByte(0x02); //  Username/Password
+
+            var socksVersion = this.SocketReadByte();
+            if (socksVersion != 0x05)
+                throw new ProxyException(string.Format("SOCKS Version '{0}' is not supported.", socksVersion));
+
+            var authenticationMethod = this.SocketReadByte();
+            switch (authenticationMethod)
+            {
+                case 0x00:
+                    break;
+                case 0x02:
+
+                    //  Send version
+                    this.SocketWriteByte(0x01);
+
+                    var encoding = new Renci.SshNet.Common.ASCIIEncoding();
+
+                    var username = encoding.GetBytes(this.ConnectionInfo.ProxyUsername);
+
+                    if (username.Length > byte.MaxValue)
+                        throw new ProxyException("Proxy username is too long.");
+
+                    //  Send username length
+                    this.SocketWriteByte((byte)username.Length);
+
+                    //  Send username
+                    this.SocketWrite(username);
+
+                    var password = encoding.GetBytes(this.ConnectionInfo.ProxyPassword);
+
+                    if (password.Length > byte.MaxValue)
+                        throw new ProxyException("Proxy password is too long.");
+
+                    //  Send username length
+                    this.SocketWriteByte((byte)password.Length);
+
+                    //  Send username
+                    this.SocketWrite(password);
+
+                    var serverVersion = this.SocketReadByte();
+
+                    if (serverVersion != 1)
+                        throw new ProxyException("SOCKS5: Server authentication version is not valid.");
+
+                    var statusCode = this.SocketReadByte();
+                    if (statusCode != 0)
+                        throw new ProxyException("SOCKS5: Username/Password authentication failed.");
+
+                    break;
+                case 0xFF:
+                    throw new ProxyException("SOCKS5: No acceptable authentication methods were offered.");
+                default:
+                    break;
+            }
+
+            //  Send socks version number
+            this.SocketWriteByte(0x05);
+
+            //  Send command code
+            this.SocketWriteByte(0x01); //  establish a TCP/IP stream connection
+
+            //  Send reserved, must be 0x00
+            this.SocketWriteByte(0x00);
+
+            IPAddress ip;
+#if SILVERLIGHT
+            if (!IPAddress.TryParse(this.ConnectionInfo.Host, out ip))
+            {
+                throw new ProxyException("SOCKS4: Silverlight supports only IP addresses.");
+            }
+#else
+            ip = Dns.GetHostAddresses(this.ConnectionInfo.Host).First();
+#endif
+
+            //  Send address type and address
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+            {
+                this.SocketWriteByte(0x01);
+                var address = ip.GetAddressBytes();
+                this.SocketWrite(address);
+            }
+            else if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                this.SocketWriteByte(0x04);
+                var address = ip.GetAddressBytes();
+                this.SocketWrite(address);
+            }
+            else
+            {
+                throw new ProxyException(string.Format("SOCKS5: IP address '{0}' is not supported.", ip));
+            }
+
+            //  Send port
+            this.SocketWriteByte((byte)(this.ConnectionInfo.Port / 0xFF));
+            this.SocketWriteByte((byte)(this.ConnectionInfo.Port % 0xFF));
+
+            //  Read Server SOCKS5 version
+            if (this.SocketReadByte() != 5)
+            {
+                throw new ProxyException("SOCKS5: Version 5 is expected.");
+            }
+
+            //  Read response code
+            var status = this.SocketReadByte();
+
+            switch (status)
+            {
+                case 0x00:
+                    break;
+                case 0x01:
+                    throw new ProxyException("SOCKS5: General failure.");
+                case 0x02:
+                    throw new ProxyException("SOCKS5: Connection not allowed by ruleset.");
+                case 0x03:
+                    throw new ProxyException("SOCKS5: Network unreachable.");
+                case 0x04:
+                    throw new ProxyException("SOCKS5: Host unreachable.");
+                case 0x05:
+                    throw new ProxyException("SOCKS5: Connection refused by destination host.");
+                case 0x06:
+                    throw new ProxyException("SOCKS5: TTL expired.");
+                case 0x07:
+                    throw new ProxyException("SOCKS5: Command not supported or protocol error.");
+                case 0x08:
+                    throw new ProxyException("SOCKS5: Address type not supported.");
+                default:
+                    throw new ProxyException("SOCKS4: Not valid response.");
+            }
+
+            //  Read 0
+            if (this.SocketReadByte() != 0)
+            {
+                throw new ProxyException("SOCKS5: 0 byte is expected.");
+            }
+
+            var addressType = this.SocketReadByte();
+            byte[] responseIp = new byte[16];
+
+            switch (addressType)
+            {
+                case 0x01:
+                    this.SocketRead(4, ref responseIp);
+                    break;
+                case 0x04:
+                    this.SocketRead(16, ref responseIp);
+                    break;
+                default:
+                    throw new ProxyException(string.Format("Address type '{0}' is not supported.", addressType));
+            }
+
+            byte[] port = new byte[2];
+
+            //  Read 2 bytes to be ignored
+            this.SocketRead(2, ref port);
+
+        }
+
+        private void ConnectHttp(Socket socket)
+        {
+            var httpResponseRe = new Regex(@"HTTP/(?<version>\d[.]\d) (?<statusCode>\d{3}) (?<reasonPhrase>.+)$");
+            var httpHeaderRe = new Regex(@"(?<fieldName>[^\[\]()<>@,;:\""/?={} \t]+):(?<fieldValue>.+)?");
+
+            var encoding = new Renci.SshNet.Common.ASCIIEncoding();
+
+            this.SocketWrite(encoding.GetBytes(string.Format("CONNECT {0}:{1} HTTP/1.0\r\n", this.ConnectionInfo.Host, this.ConnectionInfo.Port)));
+
+            //  Sent proxy authorization is specified
+            if (!string.IsNullOrEmpty(this.ConnectionInfo.ProxyUsername))
+            {
+                var authorization = string.Format("Proxy-Authorization: Basic {0}\r\n",
+                    Convert.ToBase64String(encoding.GetBytes(string.Format("{0}:{1}", this.ConnectionInfo.ProxyUsername, this.ConnectionInfo.ProxyPassword)))
+                    );
+                this.SocketWrite(encoding.GetBytes(authorization));
+            }
+
+            this.SocketWrite(encoding.GetBytes("\r\n"));
+
+            var statusCode = 0;
+            var response = string.Empty;
+            var contentLength = 0;
+
+            while (true)
+            {
+                this.SocketReadLine(ref response);
+
+                System.Diagnostics.Debug.WriteLine(response);
+
+                var match = httpResponseRe.Match(response);
+
+                if (match.Success)
+                {
+                    statusCode = int.Parse(match.Result("${statusCode}"));
+                    continue;
+                }
+                else
+                {
+                    match = httpHeaderRe.Match(response);
+                    if (match.Success)
+                    {
+                        var fieldName = match.Result("${fieldName}");
+                        if (fieldName.Equals("Content-Length", StringComparison.InvariantCultureIgnoreCase))
+                        {
+                            contentLength = int.Parse(match.Result("${fieldValue}"));
+                        }
+                        continue;
+                    }
+                }
+
+                //  Read response body if specified
+                if (string.IsNullOrEmpty(response) && contentLength > 0)
+                {
+                    var contentBody = new byte[contentLength];
+                    this.SocketRead(contentLength, ref contentBody);
+                }
+
+                if (statusCode == 200 && string.IsNullOrEmpty(response))
+                {
+                    //  Once all HTTP header information is read, exit
+                    break;
+                }
+                else
+                {
+                    var reasonPhrase = match.Result("${reasonPhrase}");
+                    throw new ProxyException(string.Format("HTTP: Status code {0}, Reason \"{1}\"", statusCode, reasonPhrase));
+                }
             }
         }
 
@@ -1549,13 +1962,9 @@ namespace Renci.SshNet
                 // and unmanaged ResourceMessages.
                 if (disposing)
                 {
-                    this._isDisconnecting = true;
 
                     if (this._socket != null)
                     {
-                        //  If socket still open try to send disconnect message to the server
-                        this.SendDisconnect(DisconnectReason.ByApplication, "Connection terminated by the client.");
-
                         this._socket.Dispose();
                         this._socket = null;
                     }
@@ -1588,18 +1997,19 @@ namespace Renci.SshNet
 
                     if (this._serverMac != null)
                     {
-                        this._serverMac.Dispose();
+                        this._serverMac.Clear();
                         this._serverMac = null;
                     }
 
                     if (this._clientMac != null)
                     {
-                        this._clientMac.Dispose();
+                        this._clientMac.Clear();
                         this._clientMac = null;
                     }
 
                     if (this._keyExchange != null)
                     {
+                        this._keyExchange.HostKeyReceived -= KeyExchange_HostKeyReceived;
                         this._keyExchange.Dispose();
                         this._keyExchange = null;
                     }
