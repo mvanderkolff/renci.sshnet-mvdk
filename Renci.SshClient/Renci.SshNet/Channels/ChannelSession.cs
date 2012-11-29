@@ -1,4 +1,7 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using Renci.SshNet.Common;
 using Renci.SshNet.Messages.Connection;
@@ -24,6 +27,7 @@ namespace Renci.SshNet.Channels
         private EventWaitHandle _channelRequestResponse = new ManualResetEvent(false);
 
         private bool _channelRequestSucces;
+        private EventWaitHandle _channelClosedHandle;
 
         /// <summary>
         /// Gets the type of the channel.
@@ -355,6 +359,64 @@ namespace Renci.SshNet.Channels
             }
 
             base.Dispose(disposing);
+        }
+
+        private void Channel_Closed(object sender, Common.ChannelEventArgs e)
+        {
+            _channelClosedHandle.Set();
+            Closed -= Channel_Closed;
+        }
+
+        public Action GetReaderAction(int bufferSize, Stream input, Action<ExceptionEventArgs> exceptionHandler, EventWaitHandle doneHandle)
+        {
+            return () =>
+            {
+                _channelClosedHandle = new AutoResetEvent(false);
+                Closed += Channel_Closed;
+                try
+                {
+                    var buffer = new byte[bufferSize];
+
+                    while (IsOpen)
+                    {
+                        var asyncResult = input.BeginRead(buffer,
+                                                            0,
+                                                            buffer.Length,
+                                                            delegate(IAsyncResult result)
+                                                                {
+                                                                    //  If input stream is closed and disposed already dont finish reading the stream
+                                                                    if (input == null)
+                                                                        return;
+
+                                                                    var read = input.EndRead(result);
+                                                                    if (read > 0)
+                                                                    {
+                                                                        this._session.SendMessage(new ChannelDataMessage(
+                                                                                                    RemoteChannelNumber,
+                                                                                                    buffer.Take(read).ToArray()));
+                                                                    }
+
+                                                                },
+                                                            null);
+
+                        EventWaitHandle.WaitAny(new WaitHandle[] { asyncResult.AsyncWaitHandle, _channelClosedHandle });
+
+                        if (asyncResult.IsCompleted) //If not, then the channel must have closed
+                            continue;
+                        else
+                            break;
+                    }
+                }
+                catch (Exception exp)
+                {
+                    exceptionHandler(new ExceptionEventArgs(exp));
+                }
+                finally
+                {
+                    this.SendMessage(new ChannelEofMessage(LocalChannelNumber)); //Signal EOF if we have reached EOF
+                    doneHandle.Set();
+                }
+            };
         }
     }
 }

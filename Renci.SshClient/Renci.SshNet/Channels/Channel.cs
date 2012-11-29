@@ -24,7 +24,7 @@ namespace Renci.SshNet.Channels
 
         private uint _maximumPacketSize = 0x8000;
 
-        private Session _session;
+        internal Session _session;
 
         /// <summary>
         /// Gets the type of the channel.

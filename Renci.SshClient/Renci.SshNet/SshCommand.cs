@@ -17,6 +17,7 @@ namespace Renci.SshNet
     /// </summary>
     public partial class SshCommand : IDisposable
     {
+        private const int _bufferSize = 32768;
         private Encoding _encoding;
 
         private Session _session;
@@ -62,6 +63,11 @@ namespace Renci.SshNet
         /// Gets the extended output stream.
         /// </summary>
         public Stream ExtendedOutputStream { get; private set; }
+
+        /// <summary>
+        /// Gets the input stream
+        /// </summary>
+        public Stream InputStream { get; private set; }
 
         private StringBuilder _result;
         /// <summary>
@@ -308,6 +314,9 @@ namespace Renci.SshNet
             //  Initialize output streams and StringBuilders
             this.OutputStream = new PipeStream();
             this.ExtendedOutputStream = new PipeStream();
+            this.InputStream = new MemoryStream();
+
+            this.ExecuteThread(_channel.GetReaderAction(_bufferSize,InputStream,e=> { },new AutoResetEvent(false)));
 
             this._result = null;
             this._error = null;

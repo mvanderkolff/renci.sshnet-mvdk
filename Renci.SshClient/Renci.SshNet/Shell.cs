@@ -136,45 +136,7 @@ namespace Renci.SshNet
 
             //  Start input stream listener
             this._dataReaderTaskCompleted = new ManualResetEvent(false);
-            this.ExecuteThread(() =>
-            {
-                try
-                {
-                    var buffer = new byte[this._bufferSize];
-
-                    while (this._channel.IsOpen)
-                    {
-                        var asyncResult = this._input.BeginRead(buffer, 0, buffer.Length, delegate(IAsyncResult result)
-                        {
-                            //  If input stream is closed and disposed already dont finish reading the stream
-                            if (this._input == null)
-                                return;
-
-                            var read = this._input.EndRead(result);
-                            if (read > 0)
-                            {
-                                this._session.SendMessage(new ChannelDataMessage(this._channel.RemoteChannelNumber, buffer.Take(read).ToArray()));
-                            }
-
-                        }, null);
-
-                        EventWaitHandle.WaitAny(new WaitHandle[] { asyncResult.AsyncWaitHandle, this._channelClosedWaitHandle });
-
-                        if (asyncResult.IsCompleted)
-                            continue;
-                        else
-                            break;
-                    }
-                }
-                catch (Exception exp)
-                {
-                    this.RaiseError(new ExceptionEventArgs(exp));
-                }
-                finally
-                {
-                    this._dataReaderTaskCompleted.Set();
-                }
-            });
+            this.ExecuteThread(_channel.GetReaderAction(_bufferSize, _input, RaiseError, _dataReaderTaskCompleted));
 
             this.IsStarted = true;
 
